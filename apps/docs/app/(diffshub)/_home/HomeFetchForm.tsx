@@ -2,7 +2,12 @@
 
 import { IconArrow, IconRefresh } from '@pierre/icons';
 import { useRouter } from 'next/navigation';
-import { type FormEvent, useState } from 'react';
+import {
+  type FormEvent,
+  startTransition,
+  useState,
+  ViewTransition,
+} from 'react';
 
 import { setCachedPatchText } from '../(view)/_components/patchCache';
 import { getPullRequestPath } from '../(view)/_components/utils';
@@ -52,7 +57,9 @@ export function HomeFetchForm() {
       // viewer route expects. Strip `.patch` because the route's dynamic
       // segment is just the PR number.
       const cleanPrPath = prPath.replace(/\.patch$/, '');
-      router.push(cleanPrPath);
+      startTransition(() => {
+        router.push(cleanPrPath);
+      });
     } catch (error) {
       setSubmitting(false);
       setErrorMessage(
@@ -69,30 +76,34 @@ export function HomeFetchForm() {
         }}
         className="flex max-w-2xl flex-col gap-2 sm:flex-row"
       >
-        <Input
-          type="url"
-          name="url"
-          inputSize="lg"
-          placeholder="Enter a GitHub pull request URL"
-          defaultValue={DEFAULT_PR_URL}
-          required
-          disabled={submitting}
-          className="text-md bg-background h-11 rounded-lg sm:flex-1"
-        />
-        <Button
-          type="submit"
-          variant="default"
-          size="lg"
-          className="size-11"
-          disabled={submitting}
-          aria-label={submitting ? 'Fetching…' : 'Fetch'}
-        >
-          {submitting ? (
-            <IconRefresh className="size-4 animate-spin" />
-          ) : (
-            <IconArrow className="size-4 rotate-180" />
-          )}
-        </Button>
+        <ViewTransition name="input">
+          <Input
+            type="url"
+            name="url"
+            inputSize="lg"
+            placeholder="Enter a GitHub pull request URL"
+            defaultValue={DEFAULT_PR_URL}
+            required
+            disabled={submitting}
+            className="text-md bg-background h-11 rounded-lg sm:flex-1"
+          />
+        </ViewTransition>
+        <ViewTransition name="button">
+          <Button
+            type="submit"
+            variant="default"
+            size="lg"
+            className="size-11"
+            disabled={submitting}
+            aria-label={submitting ? 'Fetching...' : 'Fetch'}
+          >
+            {submitting ? (
+              <IconRefresh className="size-4 animate-spin" />
+            ) : (
+              <IconArrow className="size-4 rotate-180" />
+            )}
+          </Button>
+        </ViewTransition>
       </form>
       {errorMessage != null && (
         <p className="text-destructive text-sm" role="alert">

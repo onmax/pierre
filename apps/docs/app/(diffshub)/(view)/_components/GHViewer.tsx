@@ -129,7 +129,7 @@ export function GHViewer({ initialUrl }: GHViewerProps) {
         viewerRef={viewerRef}
       />
       <CodeViewSidebar
-        className="[grid-area:viewer] md:[grid-area:tree]"
+        className="diffshub-mount-slide-up [grid-area:viewer] md:[grid-area:tree]"
         commentSections={commentSections}
         mobileOverlayOpen={fileTreeOverlayOpen}
         onMobileClose={handleCloseFileTreeOverlay}
@@ -139,7 +139,7 @@ export function GHViewer({ initialUrl }: GHViewerProps) {
         onSelectItem={handleSelectTreeItem}
       />
       <CodeViewWrapper
-        className="[grid-area:viewer]"
+        className="diffshub-mount-slide-up gh-code-view-scrollbar-y mt-[-12px] h-[calc(100%_+_12px)] pr-[3px] contain-strict [grid-area:viewer]"
         key={key}
         diffStyle={diffStyle}
         overflow={overflow}
