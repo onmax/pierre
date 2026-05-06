@@ -1,13 +1,16 @@
 'use client';
 
-import { IconArrow, IconRefresh } from '@pierre/icons';
+import { IconBrandGithub } from '@pierre/icons';
 import { useRouter } from 'next/navigation';
-import { type FormEvent, useState } from 'react';
+import { useState } from 'react';
 
+import {
+  codeViewPanelClass,
+  CodeViewUrlForm,
+} from '../(view)/_components/CodeViewUrlForm';
 import { setCachedPatchText } from '../(view)/_components/patchCache';
 import { getPullRequestPath } from '../(view)/_components/utils';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
+import { cn } from '@/lib/utils';
 
 const DEFAULT_PR_URL = 'https://github.com/nodejs/node/pull/59805';
 
@@ -18,17 +21,14 @@ const DEFAULT_PR_URL = 'https://github.com/nodejs/node/pull/59805';
 // a second round trip.
 export function HomeFetchForm() {
   const router = useRouter();
+  const [url, setUrl] = useState(DEFAULT_PR_URL);
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function handleSubmit(rawUrl: string) {
     setErrorMessage(null);
 
-    const formData = new FormData(event.currentTarget);
-    const urlField = formData.get('url');
-    const rawUrl = typeof urlField === 'string' ? urlField.trim() : '';
-    const prPath = getPullRequestPath(rawUrl);
+    const prPath = getPullRequestPath(rawUrl.trim());
     if (prPath == null) {
       setErrorMessage('Enter a valid GitHub pull request URL.');
       return;
@@ -63,37 +63,20 @@ export function HomeFetchForm() {
 
   return (
     <div className="my-5 space-y-2">
-      <form
-        onSubmit={(event) => {
-          void handleSubmit(event);
-        }}
-        className="flex max-w-2xl gap-2"
-      >
-        <Input
-          type="url"
-          name="url"
-          inputSize="lg"
-          placeholder="Enter a GitHub pull request URL"
-          defaultValue={DEFAULT_PR_URL}
-          required
-          disabled={submitting}
-          className="text-md bg-background h-11 rounded-lg sm:flex-1"
-        />
-        <Button
-          type="submit"
-          variant="default"
-          size="icon"
-          className="size-11 rounded-lg"
-          disabled={submitting}
-          aria-label={submitting ? 'Fetching…' : 'Fetch'}
-        >
-          {submitting ? (
-            <IconRefresh className="size-4 animate-spin" />
-          ) : (
-            <IconArrow className="size-4 rotate-180" />
-          )}
-        </Button>
-      </form>
+      <CodeViewUrlForm
+        className={cn(codeViewPanelClass)}
+        icon={
+          <div className="flex size-8 items-center justify-center">
+            <IconBrandGithub className="text-muted-foreground size-6 shrink-0" />
+          </div>
+        }
+        value={url}
+        onChange={setUrl}
+        // eslint-disable-next-line @typescript-eslint/no-misused-promises
+        onSubmit={handleSubmit}
+        placeholder="Enter a GitHub pull request URL"
+        submitting={submitting}
+      />
       {errorMessage != null && (
         <p className="text-destructive text-sm" role="alert">
           {errorMessage}

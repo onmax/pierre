@@ -1,7 +1,6 @@
 import { type CodeViewItem, parsePatchFiles } from '@pierre/diffs';
 import { type CodeViewHandle, useStableCallback } from '@pierre/diffs/react';
 import {
-  IconArrow,
   IconCodeStyleBars,
   IconDiffSplit,
   IconDiffUnified,
@@ -17,13 +16,13 @@ import {
   memo,
   type RefObject,
   type SetStateAction,
-  type SyntheticEvent,
   useEffect,
   useLayoutEffect,
   useRef,
   useState,
 } from 'react';
 
+import { codeViewPanelClass, CodeViewUrlForm } from './CodeViewUrlForm';
 import { DiffsHubLogo } from './DiffsHubLogo';
 import { getCachedPatchText, setCachedPatchText } from './patchCache';
 import type {
@@ -236,16 +235,13 @@ export const CodeViewHeader = memo(function CodeViewHeader({
       return undefined;
     }
   });
-  const handleSubmit = useStableCallback(
-    async (event: SyntheticEvent<HTMLFormElement>) => {
-      event.preventDefault();
-      const normalizedURL = await renderPullRequest(url);
-      if (normalizedURL == null) {
-        return;
-      }
-      setURL(normalizedURL);
+  const handleSubmit = useStableCallback(async (value: string) => {
+    const normalizedURL = await renderPullRequest(value);
+    if (normalizedURL == null) {
+      return;
     }
-  );
+    setURL(normalizedURL);
+  });
   // Auto-fetch the PR the user came in with. The page-level server component
   // has already validated `initialUrl` via `getPullRequestPath`, so we trust
   // it and fire once on mount. `renderPullRequest` is stable (useStableCallback)
@@ -258,40 +254,26 @@ export const CodeViewHeader = memo(function CodeViewHeader({
   return (
     <div
       className={cn(
-        'z-10 m-2 mb-0 contain-layout contain-paint flex flex-wrap md:flex-nowrap border-border bg-background items-center gap-2.5 rounded-xl border p-3 md:py-2 shadow-xs',
+        codeViewPanelClass,
+        'z-10 m-2 mb-0 contain-layout contain-paint flex flex-wrap md:flex-nowrap items-center gap-2.5 md:py-2',
         className
       )}
     >
-      <Link
-        href="/"
-        className="absolute top-3 left-[50%] inline-flex -translate-x-1/2 transition-transform duration-200 hover:scale-110 md:static md:translate-x-0"
-      >
-        <DiffsHubLogo />
-      </Link>
-      <span className="text-md hidden text-neutral-300 md:-mr-2 md:inline-flex">
-        /
-      </span>
-      <form
-        className="order-last flex w-full flex-col gap-2 md:order-none md:flex-row md:gap-2"
+      <CodeViewUrlForm
+        className="order-last w-full md:order-none"
+        icon={
+          <Link
+            href="/"
+            className="absolute top-3 left-[50%] inline-flex -translate-x-1/2 transition-transform duration-200 hover:scale-110 md:static md:translate-x-0"
+          >
+            <DiffsHubLogo />
+          </Link>
+        }
+        value={url}
+        onChange={setURL}
         // eslint-disable-next-line @typescript-eslint/no-misused-promises
         onSubmit={handleSubmit}
-      >
-        <input
-          className="text-md focus:bg-accent block h-8 w-full min-w-[220px] rounded-md px-2 text-center focus-visible:outline-none md:h-9 md:text-left"
-          value={url}
-          onChange={({ currentTarget }) => setURL(currentTarget.value)}
-          placeholder="e.g. https://github.com/twbs/bootstrap/pull/42139"
-        />
-        <Button
-          type="submit"
-          variant="default"
-          size="icon"
-          className="hidden md:flex"
-          aria-label="Submit"
-        >
-          <IconArrow className="size-4 rotate-180" />
-        </Button>
-      </form>
+      />
       <div className="bg-border mx-1 hidden h-5 w-px md:block" />
       <div className="flex w-full items-center gap-2 md:w-auto">
         <Button
