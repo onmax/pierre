@@ -2,7 +2,7 @@
 
 import { IconBrandGithub } from '@pierre/icons';
 import { useRouter } from 'next/navigation';
-import { useState } from 'react';
+import { startTransition, useState, ViewTransition } from 'react';
 
 import {
   codeViewPanelClass,
@@ -52,7 +52,9 @@ export function HomeFetchForm() {
       // viewer route expects. Strip `.patch` because the route's dynamic
       // segment is just the PR number.
       const cleanPrPath = prPath.replace(/\.patch$/, '');
-      router.push(cleanPrPath);
+      startTransition(() => {
+        router.push(cleanPrPath);
+      });
     } catch (error) {
       setSubmitting(false);
       setErrorMessage(
@@ -63,20 +65,22 @@ export function HomeFetchForm() {
 
   return (
     <div className="my-5 space-y-2">
-      <CodeViewUrlForm
-        className={cn(codeViewPanelClass)}
-        icon={
-          <div className="flex size-8 items-center justify-center">
-            <IconBrandGithub className="text-muted-foreground size-6 shrink-0" />
-          </div>
-        }
-        value={url}
-        onChange={setUrl}
-        // eslint-disable-next-line @typescript-eslint/no-misused-promises
-        onSubmit={handleSubmit}
-        placeholder="Enter a GitHub pull request URL"
-        submitting={submitting}
-      />
+      <ViewTransition name="input">
+        <CodeViewUrlForm
+          className={cn(codeViewPanelClass)}
+          icon={
+            <div className="flex size-8 items-center justify-center">
+              <IconBrandGithub className="text-muted-foreground size-6 shrink-0" />
+            </div>
+          }
+          value={url}
+          onChange={setUrl}
+          // eslint-disable-next-line @typescript-eslint/no-misused-promises
+          onSubmit={handleSubmit}
+          placeholder="Enter a GitHub pull request URL"
+          submitting={submitting}
+        />
+      </ViewTransition>
       {errorMessage != null && (
         <p className="text-destructive text-sm" role="alert">
           {errorMessage}
