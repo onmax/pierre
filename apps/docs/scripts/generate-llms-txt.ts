@@ -41,6 +41,7 @@ const DIFFS_SECTIONS = [
   'Installation',
   'CoreTypes',
   'ReactAPI',
+  'VueAPI',
   'VanillaAPI',
   'Virtualization',
   'CustomHunkSeparators',
@@ -79,6 +80,8 @@ const SECTION_DESCRIPTIONS: Record<string, Record<string, string>> = {
       'FileContents, FileDiffMetadata, and creating diffs from files or patches',
     ReactAPI:
       'MultiFileDiff, PatchDiff, FileDiff, File components and shared props',
+    VueAPI:
+      'Vue File, FileDiff, MultiFileDiff, PatchDiff, UnresolvedFile, Virtualizer, WorkerPoolProvider, slots, and SSR props',
     VanillaAPI:
       'FileDiff and File classes, props, deprecated vanilla custom hunk separators, and low-level renderers',
     Virtualization: 'Virtual scrolling for large diffs and files',
@@ -180,6 +183,7 @@ function extToLang(filename: string): string {
     '.tsx': 'tsx',
     '.js': 'javascript',
     '.jsx': 'jsx',
+    '.vue': 'vue',
     '.css': 'css',
     '.json': 'json',
     '.sh': 'bash',

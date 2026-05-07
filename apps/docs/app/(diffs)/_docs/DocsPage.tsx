@@ -90,6 +90,14 @@ import {
   VIRTUALIZATION_VANILLA_DIFF,
 } from '../docs/Virtualization/constants';
 import {
+  VUE_API_MULTI_FILE_DIFF,
+  VUE_API_PATCH_DIFF,
+  VUE_API_SLOTS,
+  VUE_API_SSR,
+  VUE_API_VIRTUALIZER,
+  VUE_API_WORKER_POOL,
+} from '../docs/VueAPI/constants';
+import {
   WORKER_POOL_API_REFERENCE,
   WORKER_POOL_ARCHITECTURE_ASCII,
   WORKER_POOL_CACHING,
@@ -117,7 +125,7 @@ import { renderMDX } from '@/lib/mdx';
 
 const docsTitle = 'Diffs docs';
 const docsDescription =
-  'Documentation for @pierre/diffs: React and vanilla APIs, virtualization, theming, token hooks, the worker pool, and SSR hydration.';
+  'Documentation for @pierre/diffs: React, Vue, and vanilla APIs, virtualization, theming, token hooks, the worker pool, and SSR hydration.';
 
 // Next.js replaces (does not deep-merge) nested metadata objects like
 // `openGraph` and `twitter` from parent segments. Re-declare `images` here
@@ -149,6 +157,7 @@ export default function DocsPage() {
           <InstallationSection />
           <CoreTypesSection />
           <ReactAPISection />
+          <VueAPISection />
           <VanillaAPISection />
           <VirtualizationSection />
           <CustomHunkSeparatorsSection />
@@ -319,6 +328,36 @@ async function VanillaAPISection() {
       diffHunksRenderer,
       diffHunksRendererPatch,
       fileRenderer,
+    },
+  });
+  return <ProseWrapper>{content}</ProseWrapper>;
+}
+
+async function VueAPISection() {
+  const [
+    vueAPIMultiFileDiff,
+    vueAPIPatchDiff,
+    vueAPISlots,
+    vueAPIVirtualizer,
+    vueAPIWorkerPool,
+    vueAPISsr,
+  ] = await Promise.all([
+    preloadFile(VUE_API_MULTI_FILE_DIFF),
+    preloadFile(VUE_API_PATCH_DIFF),
+    preloadFile(VUE_API_SLOTS),
+    preloadFile(VUE_API_VIRTUALIZER),
+    preloadFile(VUE_API_WORKER_POOL),
+    preloadFile(VUE_API_SSR),
+  ]);
+  const content = await renderMDX({
+    filePath: '(diffs)/docs/VueAPI/content.mdx',
+    scope: {
+      vueAPIMultiFileDiff,
+      vueAPIPatchDiff,
+      vueAPISlots,
+      vueAPISsr,
+      vueAPIVirtualizer,
+      vueAPIWorkerPool,
     },
   });
   return <ProseWrapper>{content}</ProseWrapper>;

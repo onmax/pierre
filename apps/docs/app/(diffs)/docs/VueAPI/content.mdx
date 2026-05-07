@@ -1,0 +1,55 @@
+## Vue API
+
+<Notice icon={<IconBulbFill />}>
+  Import Vue components from `@pierre/diffs/vue`.
+</Notice>
+
+The Vue API mirrors the React component lane while using Vue props and slots.
+Use `File` for a single file, `FileDiff` for parsed diff metadata,
+`MultiFileDiff` for two file versions, `PatchDiff` for one patch string, and
+`UnresolvedFile` for merge-conflict files.
+
+### Rendering Diffs
+
+Use `MultiFileDiff` when you have both file versions and want Diffs to parse the
+change for you.
+
+<DocsCodeExample {...vueAPIMultiFileDiff} />
+
+Use `PatchDiff` when you have a single-file unified patch string.
+
+<DocsCodeExample {...vueAPIPatchDiff} />
+
+### Slots
+
+Slots replace React render props. Header slots receive the file or diff object,
+annotation slots receive the annotation, and gutter utility slots receive a
+`getHoveredLine` function.
+
+<DocsCodeExample {...vueAPISlots} />
+
+`UnresolvedFile` also exposes
+`#merge-conflict-utility="{ action, context, getInstance }"`. Call
+`context.resolveConflict('current' | 'incoming' | 'both')` from your slot UI to
+resolve a conflict.
+
+### Virtualization
+
+Wrap large lists in `Virtualizer`. Nested `File` and `FileDiff` components use
+virtualized renderer instances automatically.
+
+<DocsCodeExample {...vueAPIVirtualizer} />
+
+### Worker Pool
+
+Use `WorkerPoolProvider` when syntax highlighting should run off the main
+thread. Nested Vue Diffs components inherit the shared worker pool.
+
+<DocsCodeExample {...vueAPIWorkerPool} />
+
+### SSR
+
+Server preload helpers return `prerenderedHTML`. Pass it to the matching Vue
+component so the client can hydrate the existing Shadow DOM.
+
+<DocsCodeExample {...vueAPISsr} />

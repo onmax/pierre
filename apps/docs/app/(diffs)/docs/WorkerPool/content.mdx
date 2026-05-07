@@ -16,8 +16,8 @@ we've provided some APIs to run all syntax highlighting in worker threads. The
 main thread will still attempt to render plain text synchronously and then apply
 the syntax highlighting when we get a response from the worker threads.
 
-Basic usage differs a bit depending on if you're using React or Vanilla JS APIs,
-so continue reading for more details.
+Basic usage differs a bit depending on if you're using React, Vue, or Vanilla JS
+APIs, so continue reading for more details.
 
 ### Setup
 
@@ -113,10 +113,11 @@ reference it directly:
 
 With your `workerFactory` function created, you can integrate it with our
 provided APIs. In React, you'll want to pass this `workerFactory` to a
-`<WorkerPoolContextProvider>` so all components can inherit the pool
-automatically. If you're using the Vanilla JS APIs, we provide a
-`getOrCreateWorkerPoolSingleton` helper that ensures a single pool instance that
-you can then manually pass to all your File/FileDiff instances.
+`<WorkerPoolContextProvider>`. In Vue, use `<WorkerPoolProvider>`. In both
+framework lanes, nested components inherit the pool automatically. If you're
+using the Vanilla JS APIs, we provide a `getOrCreateWorkerPoolSingleton` helper
+that ensures a single pool instance that you can then manually pass to all your
+File/FileDiff instances.
 
 <Notice icon={<IconInfoFill />} variant="warning">
   When using the worker pool, the `theme`, `lineDiffType`,
@@ -159,6 +160,12 @@ hook to access the pool manager and call `setRenderOptions()`.
 
 <DocsCodeExample {...reactUsage} />
 
+#### Vue
+
+Wrap your component tree with `WorkerPoolProvider` from `@pierre/diffs/vue`.
+Nested Vue Diffs components automatically use the shared worker pool. See
+[Vue API](#vue-api) for an example.
+
 #### Vanilla JS
 
 Use `getOrCreateWorkerPoolSingleton` to spin up a singleton worker pool. Then
@@ -181,7 +188,7 @@ To change themes or other render options dynamically, call
 The worker pool can cache rendered AST results to avoid redundant highlighting
 work. When a file or diff has a `cacheKey`, subsequent requests with the same
 key will return cached results immediately instead of reprocessing through a
-worker. This works automatically for both React and Vanilla JS APIs.
+worker. This works automatically for React, Vue, and Vanilla JS APIs.
 
 <Notice icon={<IconInfoFill />}>
   Caching is enabled per-file/diff by setting a `cacheKey` property. Files and
@@ -195,8 +202,8 @@ worker. This works automatically for both React and Vanilla JS APIs.
 ### API Reference
 
 These methods are exposed for advanced use cases. In most scenarios, you should
-use the `WorkerPoolContextProvider` for React or pass the pool instance via the
-`workerPool` option for Vanilla JS rather than calling these methods directly.
+use the framework providers or pass the pool instance via the `workerPool`
+option for Vanilla JS rather than calling these methods directly.
 
 <DocsCodeExample {...apiReference} />
 

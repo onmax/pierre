@@ -4,7 +4,7 @@
 [Shiki](https://shiki.style/). It's super customizable and packed with the
 features you need. Made with love by
 [The Pierre Computer Company](https://pierre.computer). Available as vanilla
-JavaScript and React components.
+JavaScript, React, and Vue components.
 
 **View examples and read documentation on [Diffs.com](https://diffs.com).**
 
@@ -25,6 +25,29 @@ JavaScript and React components.
 
 ```bash
 bun i @pierre/diffs
+```
+
+## Vue
+
+```vue
+<script setup lang="ts">
+import { MultiFileDiff } from '@pierre/diffs/vue';
+import type { FileContents } from '@pierre/diffs';
+
+const oldFile: FileContents = {
+  name: 'main.ts',
+  contents: 'const value = 1;\\n',
+};
+
+const newFile: FileContents = {
+  name: 'main.ts',
+  contents: 'const value = 2;\\n',
+};
+</script>
+
+<template>
+  <MultiFileDiff :old-file="oldFile" :new-file="newFile" />
+</template>
 ```
 
 ## Development

@@ -27,11 +27,10 @@ window). Directly inside that container, add a content wrapper that holds all
 diff/file instances and any other content you render. The virtualizer uses this
 wrapper to track content size changes.
 
-Inside that scroll container, render the `VirtualizedFile` and
-`VirtualizedFileDiff` components. In React, this is handled automatically by the
-built-in `Virtualizer` context. In vanilla JS, you manage this explicitly by
-creating a `Virtualizer` instance and wiring it to `VirtualizedFile` /
-`VirtualizedFileDiff` instead of the traditional APIs.
+Inside that scroll container, render file and diff components. In React and Vue,
+this is handled automatically by the built-in `Virtualizer` provider. In vanilla
+JS, you manage this explicitly by creating a `Virtualizer` instance and wiring
+it to `VirtualizedFile` / `VirtualizedFileDiff` instead of the traditional APIs.
 
 <Notice icon={<IconInfoFill />}>
   These APIs are still early and are subject to change. We may merge related
@@ -39,14 +38,13 @@ creating a `Virtualizer` instance and wiring it to `VirtualizedFile` /
   components before shipping, so please share feedback as you test these APIs.
 </Notice>
 
-### React
+### React and Vue
 
 In React, wrap your diff/file components in `Virtualizer` from
-`@pierre/diffs/react`. The `Virtualizer` component is your scroll container.
-Currently, the React wrapper does not support window scrolling unless you
-orchestrate your own provider via `VirtualizerContext.Provider` (from
-`@pierre/diffs/react`) and pass a manually created `Virtualizer` instance (from
-`@pierre/diffs`).
+`@pierre/diffs/react`. In Vue, use `Virtualizer` from `@pierre/diffs/vue`. The
+`Virtualizer` component is your scroll container. Currently, framework wrappers
+do not support window scrolling unless you orchestrate your own provider and
+pass a manually created `Virtualizer` instance from `@pierre/diffs`.
 
 <DocsCodeExample {...reactVirtualizerBasic} />
 
@@ -60,6 +58,9 @@ You can tune virtualization behavior with the `config` prop.
   `intersectionObserverMargin`, `resizeDebugging`)
 - `className` / `style`: applied to the outer scroll root
 - `contentClassName` / `contentStyle`: applied to the inner content wrapper
+
+In Vue templates, use `class` / `style` on the outer component and
+`content-class` / `content-style` for the inner content wrapper.
 
 ### Vanilla JavaScript
 

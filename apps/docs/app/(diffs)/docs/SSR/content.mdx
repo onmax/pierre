@@ -16,14 +16,13 @@ content of the diffs itself.
 ### Usage
 
 Each preload function returns an object containing the original inputs plus a
-`prerenderedHTML` string. This object can be spread directly into the
-corresponding React component for automatic hydration.
+`prerenderedHTML` string. This object can be passed to the corresponding React
+or Vue component for automatic hydration, or used with the vanilla APIs.
 
 <Notice variant="warning" icon={<IconCiWarningFill />}>
   Inputs used for pre-rendering must exactly match what's rendered in the client
-  component. We recommend spreading the entire result object into your File or
-  Diff component to ensure the client receives the same inputs that were used to
-  generate the pre-rendered HTML.
+  component. Keep the client props aligned with the preload result so the client
+  receives the same inputs that were used to generate the pre-rendered HTML.
 </Notice>
 
 #### Server Component
