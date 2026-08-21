@@ -10,6 +10,7 @@ vim.g.ale_fixers = {
 	jsonc = { "oxfmt" },
 	css = { "oxfmt" },
 	markdown = { "oxfmt" },
+	lsp_markdown = { "oxfmt" },
 	html = { "oxfmt" },
 	mdx = { "oxfmt" },
 	conf = { "oxfmt" },
