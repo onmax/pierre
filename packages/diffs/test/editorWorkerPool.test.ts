@@ -1437,8 +1437,11 @@ describe('File component edit session', () => {
         __syncRenderView: () => undefined,
         __postponeBgTokenizeToNextFrame: () => undefined,
         __captureFocusForDOMReplacement: () => undefined,
+        __emitEditComplete: () => undefined,
+        __getDocumentContents: () => undefined,
+        __getDocumentSessionState: () => undefined,
       } as unknown as DiffsEditor<undefined>;
-      const detach = instance.attachEditor(editorStub);
+      const detach = instance.__attachEditor(editorStub);
       instance.rerender();
       await waitFor(() => {
         expect(fileContainer.shadowRoot?.innerHTML ?? '').toContain(
@@ -1508,8 +1511,11 @@ describe('FileDiff component edit session', () => {
         __syncRenderView: () => undefined,
         __postponeBgTokenizeToNextFrame: () => undefined,
         __captureFocusForDOMReplacement: () => undefined,
+        __emitEditComplete: () => undefined,
+        __getDocumentContents: () => undefined,
+        __getDocumentSessionState: () => undefined,
       } as unknown as DiffsEditor<undefined>;
-      instance.attachEditor(editorStub);
+      instance.__attachEditor(editorStub);
       instance.rerender();
       await waitFor(() => {
         expect(fileContainer.shadowRoot?.innerHTML ?? '').toContain(
@@ -1530,6 +1536,9 @@ function createEditorStub(): DiffsEditor<undefined> {
     __syncRenderView: () => undefined,
     __postponeBgTokenizeToNextFrame: () => undefined,
     __captureFocusForDOMReplacement: () => undefined,
+    __emitEditComplete: () => undefined,
+    __getDocumentContents: () => undefined,
+    __getDocumentSessionState: () => undefined,
   } as unknown as DiffsEditor<undefined>;
 }
 
@@ -1589,7 +1598,7 @@ describe('rendering when an editor attaches', () => {
       const updatesBefore = updates;
       const lineBefore =
         fileContainer.shadowRoot?.querySelector('[data-line="1"]');
-      const detach = instance.attachEditor(createEditorStub());
+      const detach = instance.__attachEditor(createEditorStub());
       await wait(50);
 
       expect(updates).toBe(updatesBefore);
@@ -1663,7 +1672,7 @@ describe('rendering when an editor attaches', () => {
 
       const updatesBefore = updates;
       const siblingUpdatesBefore = siblingUpdates;
-      const detach = instance.attachEditor(createEditorStub());
+      const detach = instance.__attachEditor(createEditorStub());
       await waitFor(() => {
         expect(fileContainer.shadowRoot?.innerHTML ?? '').toContain(
           'data-char'
@@ -1703,7 +1712,7 @@ describe('rendering when an editor attaches', () => {
       instance.render({ file, fileContainer, forceRender: true });
       const request = await withTimeout(worker.waitForFileRequest());
 
-      const detach = instance.attachEditor(createEditorStub());
+      const detach = instance.__attachEditor(createEditorStub());
       // The local highlight lands without the pool ever answering. The plain
       // pool AST already carries data-char (transformer-shaped), so only the
       // highlight colors prove the attach-time session render ran.
@@ -1743,7 +1752,9 @@ describe('rendering when an editor attaches', () => {
       useTokenTransformer: true,
     });
     let attaches = 0;
-    const editor = new Editor<undefined>({ onAttach: () => attaches++ });
+    const editor = new Editor<undefined>('file-diff', {
+      onAttach: () => attaches++,
+    });
     try {
       const root = document.createElement('div');
       document.body.appendChild(root);
@@ -1866,7 +1877,7 @@ describe('rendering when an editor attaches', () => {
       const updatesBefore = updates;
       const lineBefore =
         fileContainer.shadowRoot?.querySelector('[data-line="1"]');
-      const detach = instance.attachEditor(createEditorStub());
+      const detach = instance.__attachEditor(createEditorStub());
       await wait(50);
 
       expect(updates).toBe(updatesBefore);
@@ -1908,7 +1919,7 @@ describe('rendering when an editor attaches', () => {
       });
 
       const updatesBefore = updates;
-      const detach = instance.attachEditor(createEditorStub());
+      const detach = instance.__attachEditor(createEditorStub());
       await wait(50);
 
       expect(updates).toBe(updatesBefore);

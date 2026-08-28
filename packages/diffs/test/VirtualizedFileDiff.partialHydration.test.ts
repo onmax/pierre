@@ -31,9 +31,12 @@ function createEditorStub(): DiffsEditor<undefined> {
     cleanUp() {},
     edit: () => () => {},
     __captureFocusForDOMReplacement() {},
+    __emitEditComplete() {},
+    __getDocumentContents: () => undefined,
+    __getDocumentSessionState: () => undefined,
     __postponeBgTokenizeToNextFrame() {},
     __syncRenderView() {},
-  };
+  } as unknown as DiffsEditor<undefined>;
 }
 
 function createVirtualizer(visible = true): {
@@ -464,12 +467,14 @@ describe('VirtualizedFileDiff partial hydration', () => {
       },
       virtualizerState.virtualizer
     );
-    let detach: (() => void) | undefined;
+    let detach:
+      | ReturnType<TestVirtualizedFileDiff['__attachEditor']>
+      | undefined;
 
     try {
       instance.updateCodeViewLayout(partial, 0);
       const editor = createEditorStub();
-      detach = instance.attachEditor(editor);
+      detach = instance.__attachEditor(editor);
       const loadPromise = instance.getPendingFileLoadPromiseForTest();
       assertDefined(loadPromise, 'expected edit hydration to be pending');
 
@@ -480,17 +485,19 @@ describe('VirtualizedFileDiff partial hydration', () => {
       expect(instance.getLatestDiffForTest()).toBe(partial);
 
       instance.cleanUp(true);
-      detach = undefined;
       instance.updateCodeViewLayout(partial, 0);
 
-      expect(instance.getLatestDiffForTest()).toBe(partial);
+      const recycledSession = instance.getLatestDiffForTest();
+      expect(recycledSession).not.toBe(partial);
+      expect(recycledSession?.cacheKey).toBeUndefined();
       expect(partial.isPartial).toBe(false);
 
       instance.virtualizedSetup();
       instance.updateCodeViewLayout(partial, 0);
-      detach = instance.attachEditor(editor);
+      instance.__resumeEditor(editor);
 
       const sessionDiff = instance.getLatestDiffForTest();
+      expect(sessionDiff).toBe(recycledSession);
       expect(instance.fileDiff).toBe(partial);
       expect(partial.isPartial).toBe(false);
       expect(partial.cacheKey).toBe('external:advanced-partial:hydrated');
@@ -531,11 +538,13 @@ describe('VirtualizedFileDiff partial hydration', () => {
       },
       virtualizerState.virtualizer
     );
-    let detach: (() => void) | undefined;
+    let detach:
+      | ReturnType<TestVirtualizedFileDiff['__attachEditor']>
+      | undefined;
 
     try {
       instance.updateCodeViewLayout(initial, 0);
-      detach = instance.attachEditor(createEditorStub());
+      detach = instance.__attachEditor(createEditorStub());
       const previousSession = instance.getLatestDiffForTest();
       expect(previousSession).not.toBe(initial);
 
@@ -582,11 +591,13 @@ describe('VirtualizedFileDiff partial hydration', () => {
       },
       virtualizerState.virtualizer
     );
-    let detach: (() => void) | undefined;
+    let detach:
+      | ReturnType<TestVirtualizedFileDiff['__attachEditor']>
+      | undefined;
 
     try {
       instance.updateCodeViewLayout(partial, 0);
-      detach = instance.attachEditor(createEditorStub());
+      detach = instance.__attachEditor(createEditorStub());
       const loadPromise = instance.getPendingFileLoadPromiseForTest();
       assertDefined(loadPromise, 'expected edit hydration to be pending');
 
@@ -667,11 +678,13 @@ describe('VirtualizedFileDiff partial hydration', () => {
       { disableFileHeader: true },
       virtualizerState.virtualizer
     );
-    let detach: (() => void) | undefined;
+    let detach:
+      | ReturnType<TestVirtualizedFileDiff['__attachEditor']>
+      | undefined;
 
     try {
       instance.render({ fileContainer, fileDiff: externalDiff });
-      detach = instance.attachEditor(createEditorStub());
+      detach = instance.__attachEditor(createEditorStub());
       const sessionDiff = instance.getLatestDiffForTest();
 
       instance.updateCodeViewLayout(equivalentDiff, 0);

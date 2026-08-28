@@ -93,7 +93,7 @@ async function createFixture(
   });
   const oldFile: FileContents = { name: 'edit.ts', contents: oldContents };
   const newFile: FileContents = { name: 'edit.ts', contents: newContents };
-  const editor = new Editor<undefined>();
+  const editor = new Editor<undefined>('file-diff');
 
   fileDiff.render({
     oldFile,
@@ -367,7 +367,7 @@ describe('diff editor: display-option toggle mid-edit', () => {
       theme: DEFAULT_THEMES,
       diffStyle: 'split',
     });
-    const editor = new Editor<undefined>();
+    const editor = new Editor<undefined>('file-diff');
     const oldContents = 'alpha\nbravo\n';
     const newContents = 'alpha\nCHANGED\n';
     const file = { name: 'edit.ts' };
@@ -452,7 +452,7 @@ describe('file editor: theme toggle mid-edit', () => {
       name: 'edit.ts',
       contents: 'alpha\nbravo\n',
     };
-    const editor = new Editor<undefined>();
+    const editor = new Editor<undefined>('file');
     file.render({
       file: fileContents,
       fileContainer: container,
@@ -509,11 +509,11 @@ describe('file editor: theme toggle mid-edit', () => {
 
 describe('diff editor: detach then re-attach', () => {
   // Mirrors the demo's Edit-mode toggle and surface switch: turning editing off
-  // detaches the editor (editor.cleanUp), turning it back on re-attaches the
-  // same instance (editor.edit). cleanUp tears down the tokenizer, so the
-  // re-attach must rebuild it before any edit can render. Pre-fix cleanUp kept
-  // the parsed document and its cacheKey, so __syncRenderView treated the
-  // re-attach as "same file" and skipped the rebuild that creates the
+  // recycles the editor, turning it back on re-attaches the same instance.
+  // Recycling tears down the tokenizer, so the re-attach must rebuild it before
+  // any edit can render. Pre-fix recycling kept the parsed document and its
+  // cacheKey, so __syncRenderView treated the re-attach as "same file" and
+  // skipped the rebuild that creates the
   // tokenizer; #rerender then bailed on the missing tokenizer and edits never
   // reached the DOM, even though the model still recorded them.
   test('renders edits typed after a detach/re-attach cycle', async () => {
@@ -526,7 +526,7 @@ describe('diff editor: detach then re-attach', () => {
       expect(lineText(container, 1)).toBe('alphaX');
 
       // Detach (Edit-mode off) then re-attach the same editor (Edit-mode on).
-      editor.cleanUp();
+      editor.cleanUp('recycle');
       await wait(0);
       editor.edit(fileDiff);
       await waitForEditable(container);
@@ -559,7 +559,7 @@ describe('diff editor: detach then re-attach', () => {
       contents: 'alpha\nCHANGED\n',
       cacheKey: 'new:initial',
     };
-    const editor = new Editor<undefined>();
+    const editor = new Editor<undefined>('file-diff');
     const fileDiff = new FileDiff<undefined>(
       {
         disableFileHeader: true,

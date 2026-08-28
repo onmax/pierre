@@ -66,6 +66,10 @@ class VirtualizedEditableComponent implements DiffsEditableComponent<undefined> 
     return this.options;
   }
 
+  __captureDocumentSessionState(): undefined {
+    return undefined;
+  }
+
   getCodeScrollLeft(): number {
     return 0;
   }
@@ -90,14 +94,26 @@ class VirtualizedEditableComponent implements DiffsEditableComponent<undefined> 
 
   getAnnotationSlotName = getLineAnnotationName;
 
-  completeEditSession(): void {}
+  __completeEditSession(
+    _editor: DiffsEditor<undefined>,
+    _mode: 'install' | 'discard'
+  ): void {}
 
-  attachEditor(editor: DiffsEditor<undefined>): () => void {
+  __attachEditor(editor: DiffsEditor<undefined>): () => void {
     this.#editor = editor;
     this.#syncRenderView();
     return () => {
       this.#editor = undefined;
     };
+  }
+
+  __resumeEditor(editor: DiffsEditor<undefined>): void {
+    if (this.#editor !== editor) {
+      throw new Error(
+        'VirtualizedEditableComponent: editor association changed'
+      );
+    }
+    this.rerender();
   }
 
   applyDocumentChange(
@@ -115,7 +131,6 @@ class VirtualizedEditableComponent implements DiffsEditableComponent<undefined> 
       highlighter: createTestHighlighter(),
       fileContainer: this.fileContainer,
       file: this.#file,
-      externalCacheKey: this.#file.cacheKey,
       lineAnnotations: undefined,
       renderRange: {
         // Render only line 3 so the selected line 2 remains virtualized.
@@ -171,7 +186,7 @@ function revealOffscreenLine({
     },
   });
 
-  const editor = new Editor<undefined>();
+  const editor = new Editor<undefined>('file');
   const component = new VirtualizedEditableComponent(modelLineHeight);
 
   try {

@@ -20,9 +20,12 @@ function createEditorStub(): DiffsEditor<undefined> {
     cleanUp() {},
     edit: () => () => {},
     __captureFocusForDOMReplacement() {},
+    __emitEditComplete() {},
+    __getDocumentContents: () => undefined,
+    __getDocumentSessionState: () => undefined,
     __postponeBgTokenizeToNextFrame() {},
     __syncRenderView() {},
-  };
+  } as unknown as DiffsEditor<undefined>;
 }
 
 function makeTextDocument(lines: string[]): DiffsTextDocument {
@@ -84,13 +87,13 @@ describe('FileDiff header slots', () => {
       collapsed: true,
       disableErrorHandling: true,
     });
-    let detach: (() => void) | undefined;
+    let detach: ReturnType<FileDiff<undefined>['__attachEditor']> | undefined;
 
     try {
       instance.render({ fileDiff: externalDiff, fileContainer });
       await waitForHeaderCount(fileContainer, '[data-additions-count]', '+1');
 
-      detach = instance.attachEditor(createEditorStub());
+      detach = instance.__attachEditor(createEditorStub());
       instance.applyDocumentChange(makeTextDocument(['new\n', 'extra\n']));
 
       await waitForHeaderCount(fileContainer, '[data-additions-count]', '+2');

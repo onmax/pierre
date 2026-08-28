@@ -30,6 +30,7 @@ import type {
   DiffsEditor,
   EditCompletionDecision,
   EditorChangeEvent,
+  EditorDocumentKind,
   HunkSeparators,
   PendingCodeViewLayoutReset,
   SelectedLineRange,
@@ -339,6 +340,14 @@ export interface CodeViewModeItemMap<LAnnotation> {
   diff: CodeViewDiffItem<LAnnotation>;
 }
 
+export type CodeViewItemEditCompleteHandler<LAnnotation> = <
+  TMode extends CodeViewMode,
+>(
+  event: CodeViewItemEditCompleteEventMap<LAnnotation>[TMode],
+  item: CodeViewModeItemMap<LAnnotation>[TMode],
+  nextItem: CodeViewModeItemMap<LAnnotation>[TMode]
+) => EditCompletionDecision;
+
 type CodeViewModeItemContext<
   LAnnotation,
   TMode extends CodeViewMode,
@@ -517,23 +526,30 @@ export interface CodeViewOptions<LAnnotation>
   onSelectedLinesChange?(selection: CodeViewLineSelection | null): void;
   layout?: CodeViewLayout;
   /**
+   * Return an in-memory retention key for an item's editable draft and
+   * undo/redo history. Called only when CodeView creates the item's editor.
+   */
+  getEditStateKey?(item: CodeViewItem<LAnnotation>): string | undefined;
+  /**
    * Create an editor for an item entering edit mode (`edit: true`). Providing
    * this option is what enables item editing. Pass the given options into the
-   * editor constructor — `new Editor(options)` — so CodeView can route
-   * document changes to `onItemEditChange`. CodeView owns the returned
-   * editor's lifecycle: it attaches when the edited item mounts, re-attaches
-   * across virtualization unmounts and collapse (which suspend the session),
-   * and tears the editor down when the session ends (edit off or removal).
-   * Returning undefined declines the attach; CodeView retries on later
-   * render passes.
+   * editor constructor — `new Editor(documentKind, options, editStateKey)` —
+   * so CodeView can route document changes to `onItemEditChange` and retain
+   * history when requested. CodeView owns the returned editor's lifecycle: it
+   * associates with the edited item, suspends and resumes rendering across
+   * virtualization unmounts and collapse, and tears the editor down when the
+   * session ends (edit off or removal). Returning undefined declines the
+   * attach; CodeView retries on later render passes.
    */
   createEditor?(
-    options: CodeViewCreateEditorOptions<LAnnotation>
+    documentKind: EditorDocumentKind,
+    options: CodeViewCreateEditorOptions<LAnnotation>,
+    editStateKey?: string
   ): DiffsEditor<LAnnotation> | undefined;
   /**
    * Called with the editor's `EditorChangeEvent` and the owning item whenever
    * the edited document changes, from internal (edit) changes or external
-   * (CodeViewItem) changes.
+   * (CodeViewItem) changes. The event contains that same attached editor.
    *
    * Do not feed these changes back into item state.
    */
@@ -542,11 +558,10 @@ export interface CodeViewOptions<LAnnotation>
     item: CodeViewItem<LAnnotation>
   ): void;
   /**
-   * Called once when a changed edit session ends: edit turned off, the item
-   * is removed from items, or the viewer tears down (`reset()`/`cleanUp()`,
-   * where the result is not installed because the viewer is going away). Not
-   * called for sessions without changes, or for collapse (which suspends the
-   * session until the item expands).
+   * Called once when an edit session ends: edit to false, the item is removed
+   * from items, or the viewer tears down (`reset()`/`cleanUp()`, where the
+   * result is not installed because the viewer is going away). Collapse does
+   * not call it because the session remains active until the item expands.
    *
    * The event carries the completed `file`/`fileDiff` built from the edit
    * session. `item` is the item that owned the session, and `nextItem` is
@@ -556,13 +571,10 @@ export interface CodeViewOptions<LAnnotation>
    * item update path when the item still exists, and a controlled owner puts
    * the same `nextItem` into its state — or `'reject'` to revert. The event is
    * frozen; re-key the accepted value in place (`event.fileDiff.cacheKey =
-   * '…'`) before accepting.
+   * '…'`) before accepting. The event contains the detached editor with its
+   * final pre-detach state.
    */
-  onItemEditComplete?<TMode extends CodeViewMode>(
-    event: CodeViewItemEditCompleteEventMap<LAnnotation>[TMode],
-    item: CodeViewModeItemMap<LAnnotation>[TMode],
-    nextItem: CodeViewModeItemMap<LAnnotation>[TMode]
-  ): EditCompletionDecision;
+  onItemEditComplete?: CodeViewItemEditCompleteHandler<LAnnotation>;
 
   /** Render a non-virtualized element at the very start of the scroll content,
    * before the first item. It is always rendered and scrolls with the content.
@@ -669,9 +681,9 @@ export class CodeView<LAnnotation = undefined> {
   private idToItem: CodeViewItemMap<LAnnotation> = new Map();
   private selectedLines: CodeViewLineSelection | null = null;
   // One editor per edit-mode item, created lazily via options.createEditor.
-  // Entries survive virtualization unmounts so a remounted item re-attaches
-  // its existing editor; attachedEditors tracks which entries are currently
-  // bound to a mounted instance. Each record shares its instance's options
+  // Entries survive virtualization unmounts with their editor association;
+  // attachedEditors tracks which entries currently render an editor surface.
+  // Each record shares its instance's options
   // state, whose `id` updateItemId keeps pointed at the current item.
   private itemEditors: Map<string, CodeViewItemEditorRecord<LAnnotation>> =
     new Map();
@@ -1180,7 +1192,7 @@ export class CodeView<LAnnotation = undefined> {
     let failure: unknown;
     for (const { record, instance } of teardownSessions) {
       try {
-        record.editor.cleanUp('complete');
+        record.editor.cleanUp('discard');
         instance?.cleanUp();
       } catch (error) {
         if (!failed) {
@@ -1318,8 +1330,8 @@ export class CodeView<LAnnotation = undefined> {
     }
 
     item.instance.cleanUp(true);
-    // Instance cleanup fully detached any attached editor. The editor itself
-    // stays in itemEditors so the item re-attaches it on remount.
+    // Instance cleanup suspends the editor surface. The association stays in
+    // itemEditors so the same component and editor resume on remount.
     this.attachedEditors.delete(item.item.id);
     item.element = undefined;
     if (element == null) {
@@ -2050,8 +2062,8 @@ export class CodeView<LAnnotation = undefined> {
    * from the render loop so every mounted item passes through it: fresh
    * mounts, remounts after virtualization released the item, and items whose
    * edit flag was just turned on. Editors persist across unmounts, so a
-   * remounted item re-attaches its existing editor and resumes the retained
-   * document; the instance retains its private session model so the remount
+   * remounted item resumes its existing editor and retained document; the
+   * instance retains its private session model so the remount
    * paints the edited text without changing the host input.
    */
   private attachItemEditor(item: CodeViewContextItem<LAnnotation>): void {
@@ -2081,15 +2093,19 @@ export class CodeView<LAnnotation = undefined> {
         // renames keep it pointed at the right item. It also reads the change
         // callback off this.options at invocation time so later setOptions
         // swaps aren't stranded on the callback captured at creation.
-        const editor = createEditor({
-          onChange: (event) => {
-            const latest = this.idToItem.get(state.id);
-            if (latest == null) {
-              return;
-            }
-            this.options.onItemEditChange?.(event, latest.item);
+        const editor = createEditor(
+          item.instance.type === 'file-diff' ? 'file-diff' : 'file',
+          {
+            onChange: (event) => {
+              const latest = this.idToItem.get(state.id);
+              if (latest == null) {
+                return;
+              }
+              this.options.onItemEditChange?.(event, latest.item);
+            },
           },
-        });
+          this.options.getEditStateKey?.(item.item)
+        );
         if (editor == null) {
           return;
         }
@@ -2136,11 +2152,10 @@ export class CodeView<LAnnotation = undefined> {
       if (removedItem == null && item != null) {
         const { edit = false, collapsed = false } = item.item;
         if (edit) {
-          // If we are collapsed, we'll tear down the editor until we need it
-          // again, but undo history/cursor/selections will still be saved
-          // if/when we resume
+          // Collapse suspends editor rendering. Keep its component association,
+          // document, and undo history for expansion; DOM-backed state resets.
           if (collapsed && this.attachedEditors.delete(id)) {
-            record.editor.cleanUp();
+            record.editor.cleanUp('recycle');
           }
           continue;
         }

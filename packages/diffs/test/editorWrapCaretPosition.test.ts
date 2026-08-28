@@ -210,7 +210,7 @@ async function createWrapEditor(
     theme: DEFAULT_THEMES,
     overflow: 'wrap',
   });
-  const editor = new Editor<undefined>();
+  const editor = new Editor<undefined>('file');
   const initialFile: FileContents = {
     name: 'wrap.ts',
     contents,
@@ -266,7 +266,7 @@ function expectCaret(
   line: number,
   character: number
 ): void {
-  const selection = editor.getState().selections?.at(-1);
+  const selection = editor.getViewState().selections?.at(-1);
   expect(selection?.start).toEqual({ line, character });
   expect(selection?.end).toEqual({ line, character });
 }
@@ -277,7 +277,7 @@ function caretState(editor: Editor<undefined>): {
   line: number;
   character: number;
 } {
-  const selection = editor.getState().selections?.at(-1);
+  const selection = editor.getViewState().selections?.at(-1);
   if (selection === undefined) {
     throw new Error('no selection in editor state');
   }
@@ -454,7 +454,7 @@ describe('editor wrap caret position', () => {
       theme: DEFAULT_THEMES,
       overflow: 'wrap',
     });
-    const editor = new Editor<undefined>();
+    const editor = new Editor<undefined>('file');
     const initialFile: FileContents = {
       name: 'wrap.ts',
       contents: 'const a = 1;\nconst b = 2;\nconst c = 3;\nconst d = 4;',

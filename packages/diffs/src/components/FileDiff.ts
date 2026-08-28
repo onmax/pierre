@@ -14,6 +14,7 @@ import {
   THEME_CSS_ATTRIBUTE,
   UNSAFE_CSS_ATTRIBUTE,
 } from '../constants';
+import type { FileDiffEditCompleteEvent } from '../editor/types';
 import {
   type GetHoveredLineResult,
   type GetLineIndexUtility,
@@ -34,10 +35,12 @@ import {
   type HunksRenderResult,
 } from '../renderers/DiffHunksRenderer';
 import { SVGSpriteSheet } from '../sprite';
+export type { FileDiffEditCompleteEvent } from '../editor/types';
 import type {
   AppliedThemeStyleCache,
   BaseCodeOptions,
   BaseDiffOptions,
+  CapturedDiffSessionState,
   CustomPreProperties,
   DiffLineAnnotation,
   DiffsEditableComponent,
@@ -60,6 +63,7 @@ import type {
   RenderHeaderMetadataCallback,
   RenderHeaderPrefixCallback,
   RenderRange,
+  RetainedDiffSessionSnapshot,
   SelectedLineRange,
   SelectionSide,
   ThemeTypes,
@@ -72,7 +76,10 @@ import { arePrePropertiesEqual } from '../utils/arePrePropertiesEqual';
 import { areRenderRangesEqual } from '../utils/areRenderRangesEqual';
 import { areThemesEqual } from '../utils/areThemesEqual';
 import { awaitWithTimeout } from '../utils/awaitWithTimeout';
-import { cloneFileDiffMetadata } from '../utils/cloneFileDiffMetadata';
+import {
+  cloneFileDiffMetadata,
+  cloneHunks,
+} from '../utils/cloneFileDiffMetadata';
 import { createAnnotationWrapperNode } from '../utils/createAnnotationWrapperNode';
 import { createGutterUtilityContentNode } from '../utils/createGutterUtilityContentNode';
 import { createUnsafeCSSStyleNode } from '../utils/createUnsafeCSSStyleNode';
@@ -91,7 +98,6 @@ import {
   captureExpansionAnchors,
   finishEditSessionForDiff,
   rebuildExpansionFromAnchors,
-  rebuildSessionHunks,
 } from '../utils/editSessionHunks';
 import { getDiffFileInput } from '../utils/getDiffFileInput';
 import { getDiffHunksRendererOptions } from '../utils/getDiffHunksRendererOptions';
@@ -112,6 +118,7 @@ import { prerenderHTMLIfNecessary } from '../utils/prerenderHTMLIfNecessary';
 import { getMeasuredScrollbarGutter } from '../utils/scrollbarGutter';
 import { setPreNodeProperties } from '../utils/setWrapperNodeProps';
 import { splitFileContents } from '../utils/splitFileContents';
+import { recomputeDiffRenderLineCounts } from '../utils/updateDiffHunks';
 import {
   getExpandedRegion,
   getHunkAdditionLineRange,
@@ -135,25 +142,6 @@ type DeferredEditorActiveLineWrite = [
   lineNumber: number | null,
   options: EditorActiveLineOptions | undefined,
 ];
-
-interface PendingEditSessionReplacement {
-  /**
-   * The private editable diff that was active before the new external diff
-   * arrived. It remains active while a partial replacement is loading and is
-   * compared with the completed replacement to determine history compatibility.
-   */
-  editSessionDiff: FileDiffMetadata;
-  /**
-   * The cache key associated with the current editable diff.
-   * The editor continues using it until the replacement is ready.
-   */
-  prevExternalCacheKey: string | undefined;
-}
-
-interface PendingPersistedDocumentRestore {
-  editSessionDiff: FileDiffMetadata;
-  previousContents: string;
-}
 
 function canHydrateDiff(fileDiff: FileDiffMetadata): boolean {
   return (
@@ -198,6 +186,32 @@ function shouldResetUndoState(
   );
 }
 
+function areLinesEqual(first: string[], second: string[]): boolean {
+  return (
+    first.length === second.length &&
+    first.every((line, index) => line === second[index])
+  );
+}
+
+// There are certain scenarios where if a diff changes in a certain way, we
+// cannot consider the session resumable.  Basically if the old file has
+// changed in any way (name or contents), then our restored diff would be
+// completely invalid
+function canRestoreDiffSession(
+  snapshot: RetainedDiffSessionSnapshot,
+  externalDiff: FileDiffMetadata
+): boolean {
+  const { oldFile } = snapshot;
+  if (oldFile == null) {
+    return externalDiff.type === 'new';
+  }
+  return (
+    externalDiff.type !== 'new' &&
+    oldFile.name === (externalDiff.prevName ?? externalDiff.name) &&
+    areLinesEqual(oldFile.lines, externalDiff.deletionLines)
+  );
+}
+
 export interface FileDiffRenderBaseProps<LAnnotation> {
   fileDiff?: FileDiffMetadata;
   deferManagers?: boolean;
@@ -224,40 +238,12 @@ export type FileDiffHydrationProps<LAnnotation> = Omit<
 export type FileDiffType = 'file-diff' | 'unresolved-file';
 
 /**
- * `onEditComplete` event argument when an edit session ends with a changed
- * diff.
- *
- * `fileDiff` is a freshly computed diff of the edited contents with no
- * `cacheKey` set; accepting installs it.
- *
- * `originalFileDiff` is the last `fileDiff` the component was given externally;
- * a revert restores it.
- *
- * `oldFile`/`newFile` are the completed contents as a file pair, for updating
- * file-pair or patch inputs. `null` marks the absent side of an added file (a
- * deleted file cannot be edited).
- *
- * `lineAnnotations` is the completed annotation collection, potentially
- * modified based on the edit changes to keep annotations aligned to their
- * intended targets
- *
- * `originalLineAnnotations` is the last collection provided to the component
- * externally, which a revert keeps.
- */
-export interface FileDiffEditCompleteEvent<LAnnotation> {
-  fileDiff: FileDiffMetadata;
-  originalFileDiff: FileDiffMetadata;
-  oldFile: FileContents | null;
-  newFile: FileContents | null;
-  lineAnnotations: DiffLineAnnotation<LAnnotation>[] | undefined;
-  originalLineAnnotations: DiffLineAnnotation<LAnnotation>[];
-}
-
-/**
  * Decides a completed edit synchronously: return `'accept'` to install the
- * event's `fileDiff`, or `'reject'` to restore `originalFileDiff`. The event is
- * frozen, so re-key the accepted diff in place (`event.fileDiff.cacheKey =
- * '…'`) before accepting. A missing handler rejects.
+ * event's `fileDiff` and annotations, or `'reject'` to restore the original
+ * values. The event is frozen, so re-key the accepted diff in place
+ * (`event.fileDiff.cacheKey = '…'`) before accepting. The event's editor is
+ * detached and returns its final state from `getViewState()`. A missing handler
+ * rejects.
  */
 export type FileDiffEditCompleteHandler<LAnnotation> = (
   event: FileDiffEditCompleteEvent<LAnnotation>
@@ -309,10 +295,11 @@ export interface FileDiffOptions<LAnnotation>
   onEditChange?(event: EditorChangeEvent<LAnnotation, 'diff'>): void;
 
   /**
-   * Fired when `edit` toggles false or a component unmounts. Only called if
-   * there are content changes resolving in a new diff. If no callback is
-   * provided, then the component will always revert back to the last
-   * `fileDiff` or `oldFile`/`newFiles` passed into the component
+   * Fired when `edit` toggles false or a component unmounts, including when the
+   * final contents are unchanged. If no callback is provided, the component
+   * reverts to the last `fileDiff` or `oldFile`/`newFiles` and annotations
+   * passed into it. The callback receives the detached editor with its final
+   * pre-detach state.
    */
   onEditComplete?: FileDiffEditCompleteHandler<LAnnotation>;
 }
@@ -419,12 +406,9 @@ export class FileDiff<
   private editSessionAnnotations:
     | EditSessionAnnotations<DiffLineAnnotation<LAnnotation>>
     | undefined;
-  private pendingEditSessionReplacement:
-    | PendingEditSessionReplacement
-    | undefined;
-  private pendingPersistedDocumentRestore:
-    | PendingPersistedDocumentRestore
-    | undefined;
+  // Keeps the outgoing editable diff until its replacement is ready to sync,
+  // so the editor can decide whether to preserve or reset undo history.
+  private outgoingSessionDiff: FileDiffMetadata | undefined;
   protected renderedDiff: FileDiffMetadata | undefined;
   protected renderRange: RenderRange | undefined;
   protected pendingFiles: PendingFileLoad | undefined;
@@ -877,15 +861,15 @@ export class FileDiff<
   }
 
   public cleanUp(recycle: boolean = false): void {
+    const { editor } = this;
     dequeueRender(this.handleEditSessionRender);
     this.emitPostRender(true);
     // Tear the editor down while the code scrollers still exist. A recycle
-    // persists its editor state; a full teardown ends the session, so the
-    // editor drops its stored document instead.
-    this.editor?.cleanUp(recycle ? 'recycle' : 'complete');
-    this.editor = undefined;
+    // keeps its document and undo history; a full teardown drops them as the
+    // session ends.
+    editor?.cleanUp(recycle ? 'recycle' : 'discard');
     if (!recycle) {
-      this.settleEditSession(false);
+      this.editor = undefined;
     }
     this.resizeManager.cleanUp();
     this.interactionManager.cleanUp();
@@ -947,8 +931,7 @@ export class FileDiff<
       this.fileDiff = undefined;
       this.editSessionDiff = undefined;
       this.editSessionAnnotations = undefined;
-      this.pendingEditSessionReplacement = undefined;
-      this.pendingPersistedDocumentRestore = undefined;
+      this.outgoingSessionDiff = undefined;
       this.renderedDiff = undefined;
       this.deletionFile = undefined;
       this.additionFile = undefined;
@@ -990,7 +973,12 @@ export class FileDiff<
     const oldFile = fileInput?.oldFile;
     const newFile = fileInput?.newFile;
     this.hydrateElements(fileContainer, prerenderedHTML);
+    // An editor attached before hydration may carry a retained keyed document
+    // and its session-shaped hunks. Render through that private session instead
+    // of adopting external markup, so hydration cannot recompute or flash it.
+    const forceEditorRender = this.editor != null;
     if (
+      forceEditorRender ||
       shouldRenderCode(
         this.pre,
         hasDiffContent({ fileDiff, oldFile, newFile }),
@@ -1007,6 +995,7 @@ export class FileDiff<
         fileContainer,
         lineAnnotations,
         fileDiff,
+        forceRender: forceEditorRender || fileInputProps.forceRender,
         preventEmit: true,
       });
     }
@@ -1244,22 +1233,26 @@ export class FileDiff<
     if (this.fileDiff !== expectedDiff) {
       return false;
     }
-    if (this.pendingEditSessionReplacement != null) {
-      this.installExternalEditSession(expectedDiff);
+    const { editor } = this;
+    if (this.outgoingSessionDiff != null) {
+      this.installEditSession(expectedDiff);
       return true;
     }
-    const { editor } = this;
     if (editor == null || this.editSessionDiff != null) {
       return false;
     }
-    this.createInitialEditSession(editor, expectedDiff);
+    this.installEditSession(
+      expectedDiff,
+      editor.__getDocumentContents(getAdditionFile(expectedDiff)),
+      editor.__getDocumentSessionState()
+    );
     return true;
   }
 
   // Install a replacement diff from the caller; returns false when it is the
   // diff already installed. During an edit session, the outgoing session diff
-  // and cache key are kept aside until the editor syncs — it uses them to
-  // decide whether the swap keeps or resets undo history. A hydrated
+  // is kept aside until the editor syncs so it can decide whether the swap
+  // keeps or resets undo history. A hydrated
   // replacement starts its new session immediately; a partial one starts
   // loading its files and gets a session once hydrated.
   protected updateExternalDiff(
@@ -1270,30 +1263,29 @@ export class FileDiff<
       return false;
     }
 
-    const {
-      fileDiff: prevFileDiff,
-      pendingEditSessionReplacement: pendingReplacement,
-    } = this;
-    const editSessionDiff =
-      pendingReplacement?.editSessionDiff ?? this.editSessionDiff;
-    const prevExternalCacheKey =
-      pendingReplacement?.prevExternalCacheKey ?? prevFileDiff?.cacheKey;
+    const editSessionDiff = this.outgoingSessionDiff ?? this.editSessionDiff;
 
     this.fileDiff = incomingExternalDiff;
-    this.pendingEditSessionReplacement = undefined;
-    this.pendingPersistedDocumentRestore = undefined;
+    this.outgoingSessionDiff = undefined;
     if (editSessionDiff != null) {
-      this.pendingEditSessionReplacement = {
-        editSessionDiff,
-        prevExternalCacheKey,
-      };
+      this.outgoingSessionDiff = editSessionDiff;
       if (incomingExternalDiff.isPartial) {
         this.loadFilesIfNecessary();
       } else {
-        this.installExternalEditSession(incomingExternalDiff);
+        this.installEditSession(incomingExternalDiff);
       }
-    } else if (this.editor != null && !incomingExternalDiff.isPartial) {
-      this.createInitialEditSession(this.editor, incomingExternalDiff);
+    } else if (this.editor != null) {
+      if (incomingExternalDiff.isPartial) {
+        this.loadFilesIfNecessary();
+      } else {
+        this.installEditSession(
+          incomingExternalDiff,
+          this.editor.__getDocumentContents(
+            getAdditionFile(incomingExternalDiff)
+          ),
+          this.editor.__getDocumentSessionState()
+        );
+      }
     }
     if (this.editSessionAnnotations != null && lineAnnotations != null) {
       // These annotations arrived with the new diff, so their line numbers
@@ -1310,53 +1302,66 @@ export class FileDiff<
     return true;
   }
 
-  private installExternalEditSession(externalDiff: FileDiffMetadata): void {
-    const sessionDiff = createEditSessionDiff(externalDiff);
-    this.editSessionDiff = sessionDiff;
-    this.hunksRenderer.beginEditSession(sessionDiff, externalDiff);
-  }
-
-  /**
-   * Create the first private editable diff for an editor attachment. When a
-   * persisted document has different text, rebuild the private diff from that
-   * text so the restored editor document and rendered rows start in sync.
-   */
-  private createInitialEditSession(
-    editor: DiffsEditor<LAnnotation>,
-    externalDiff: FileDiffMetadata
+  // When an editor opens a document saved under a document key,
+  // `retainedDocument` restores its text and undo history. It is omitted when
+  // replacing the diff in an open editor so the replacement is handled as a
+  // new external update instead of overwriting the document being edited.
+  private installEditSession(
+    externalDiff: FileDiffMetadata,
+    retainedDocument?: FileContents,
+    retainedSession?: RetainedDiffSessionSnapshot
   ): void {
-    const editSessionDiff = createEditSessionDiff(externalDiff);
-    const cachedContents = editor.__getCachedDocumentContents?.(externalDiff);
-    const restoredPersistedContents =
-      cachedContents != null &&
-      cachedContents !== externalDiff.additionLines.join('');
-
-    if (restoredPersistedContents) {
-      const {
-        collapsedContextThreshold = DEFAULT_COLLAPSED_CONTEXT_THRESHOLD,
-      } = this.options;
-      const anchors = captureExpansionAnchors(
-        externalDiff,
-        this.hunksRenderer.getExpandedHunksMap(),
-        collapsedContextThreshold
+    const externalContents = externalDiff.additionLines.join('');
+    const retainedLines =
+      retainedDocument != null
+        ? splitFileContents(retainedDocument.contents)
+        : undefined;
+    const restoreRetainedSession =
+      retainedSession != null &&
+      canRestoreDiffSession(retainedSession, externalDiff);
+    if (retainedSession != null && !restoreRetainedSession) {
+      throw new Error(
+        'FileDiff: retained session cannot resume against a different old file'
       );
-      editSessionDiff.additionLines = splitFileContents(cachedContents);
-      rebuildSessionHunks(editSessionDiff, this.options.parseDiffOptions);
-      this.hunksRenderer.setExpandedHunksMap(
-        rebuildExpansionFromAnchors(editSessionDiff, anchors)
-      );
-      this.pendingPersistedDocumentRestore = {
-        editSessionDiff,
-        previousContents: externalDiff.additionLines.join(''),
-      };
-    } else {
-      this.pendingPersistedDocumentRestore = undefined;
     }
-
-    this.editSessionDiff = editSessionDiff;
+    if (
+      retainedDocument != null &&
+      retainedDocument.contents !== externalContents &&
+      !restoreRetainedSession
+    ) {
+      throw new Error(
+        'FileDiff: retained edits are missing their diff session state'
+      );
+    }
+    const usesExternalDocument =
+      retainedDocument == null ||
+      (retainedDocument.name === externalDiff.name &&
+        retainedDocument.lang === externalDiff.lang &&
+        retainedDocument.contents === externalContents);
+    const sessionDiff = createEditSessionDiff(externalDiff);
+    if (
+      retainedDocument != null &&
+      retainedLines != null &&
+      !usesExternalDocument
+    ) {
+      sessionDiff.name = retainedDocument.name;
+      sessionDiff.lang = retainedDocument.lang;
+    }
+    if (
+      restoreRetainedSession &&
+      retainedSession != null &&
+      retainedLines != null
+    ) {
+      sessionDiff.additionLines = retainedLines;
+      sessionDiff.type = retainedSession.type;
+      sessionDiff.hunks = retainedSession.hunks;
+      sessionDiff.editSessionDirty = true;
+      recomputeDiffRenderLineCounts(sessionDiff);
+    }
+    this.editSessionDiff = sessionDiff;
     this.hunksRenderer.beginEditSession(
-      editSessionDiff,
-      restoredPersistedContents ? undefined : externalDiff
+      sessionDiff,
+      usesExternalDocument && !restoreRetainedSession ? externalDiff : undefined
     );
   }
 
@@ -1705,42 +1710,23 @@ export class FileDiff<
       ) {
         return;
       }
-      const {
-        pendingEditSessionReplacement: replacement,
-        fileDiff: externalDiff,
-        pendingPersistedDocumentRestore: pendingRestore,
-      } = this;
+      const { outgoingSessionDiff: replacement, fileDiff: externalDiff } = this;
       const externalDocument =
-        replacement != null &&
-        externalDiff != null &&
-        replacement.editSessionDiff !== fileDiff;
+        replacement != null && externalDiff != null && replacement !== fileDiff;
       const resetHistory = externalDocument
-        ? shouldResetUndoState(replacement.editSessionDiff, externalDiff)
+        ? shouldResetUndoState(replacement, externalDiff)
         : false;
-      const externalCacheKey =
-        replacement != null && !externalDocument
-          ? replacement.prevExternalCacheKey
-          : externalDiff?.cacheKey;
-      const restoredDocument =
-        pendingRestore?.editSessionDiff === fileDiff
-          ? pendingRestore.previousContents
-          : undefined;
       if (externalDocument) {
-        this.pendingEditSessionReplacement = undefined;
-      }
-      if (restoredDocument != null) {
-        this.pendingPersistedDocumentRestore = undefined;
+        this.outgoingSessionDiff = undefined;
       }
       editor.__syncRenderView({
         highlighter,
         fileContainer,
         fileDiff,
-        externalCacheKey,
         lineAnnotations,
         renderRange,
         externalDocument,
         resetHistory,
-        restoredDocument,
       });
     });
   }
@@ -1804,34 +1790,94 @@ export class FileDiff<
     onEditChange?.(event);
   }
 
-  public attachEditor(
-    editor: DiffsEditor<LAnnotation>
-  ): (recycle?: boolean) => void {
+  /**
+   * @internal Capture the current diff session, or return `undefined` when no
+   * complete compatible session exists.
+   *
+   * When `clone` is true, the returned lines and hunks are copied.
+   */
+  public __captureDocumentSessionState(
+    clone = true
+  ): CapturedDiffSessionState | undefined {
+    let { outgoingSessionDiff, fileDiff, editSessionDiff: sessionDiff } = this;
+    if (outgoingSessionDiff != null && fileDiff != null) {
+      if (
+        !fileDiff.isPartial &&
+        shouldResetUndoState(outgoingSessionDiff, fileDiff)
+      ) {
+        return undefined;
+      }
+      sessionDiff = outgoingSessionDiff;
+    }
+    if (sessionDiff == null || sessionDiff.isPartial) {
+      return undefined;
+    }
+    return {
+      diffSession: {
+        oldFile:
+          sessionDiff.type !== 'new'
+            ? {
+                name: sessionDiff.prevName ?? sessionDiff.name,
+                lines: clone
+                  ? [...sessionDiff.deletionLines]
+                  : sessionDiff.deletionLines,
+              }
+            : null,
+        type: sessionDiff.type,
+        hunks: clone ? cloneHunks(sessionDiff.hunks) : sessionDiff.hunks,
+      },
+      hasChanges: sessionDiff.editSessionDirty === true,
+    };
+  }
+
+  /** @internal Associate this component with its editor for a render lifecycle. */
+  public __attachEditor(editor: DiffsEditor<LAnnotation>): () => void {
     // Editing is a plain file-diff concern only. Subclasses with their own
     // hunk semantics (UnresolvedFile) are not editable, so an editor must
     // never attach to them.
     if (this.type !== 'file-diff') {
       throw new Error(
-        `FileDiff.attachEditor: cannot attach an editor to a "${this.type}" diff`
+        `FileDiff.__attachEditor: cannot attach an editor to a "${this.type}" diff`
       );
     }
-    this.editor?.cleanUp();
-    this.editor = editor;
+    if (this.editor != null) {
+      throw new Error('FileDiff.__attachEditor: an editor is already attached');
+    }
+    const detach = () => {
+      this.editor = undefined;
+      this.finishEditSession();
+    };
+    try {
+      this.resumeEditorRendering(editor);
+      return detach;
+    } catch (error) {
+      detach();
+      throw error;
+    }
+  }
+
+  /** @internal Resume rendering for the editor already associated with this component. */
+  public __resumeEditor(editor: DiffsEditor<LAnnotation>): void {
+    if (this.editor !== editor) {
+      throw new Error('FileDiff.__resumeEditor: editor association changed');
+    }
+    this.resumeEditorRendering(editor);
+  }
+
+  private resumeEditorRendering(editor: DiffsEditor<LAnnotation>): void {
     this.editSessionAnnotations ??= adoptEditSessionAnnotations(
       this.lineAnnotations,
       getLineAnnotationName
     );
-    const {
-      fileDiff: externalDiff,
-      pendingEditSessionReplacement: pendingReplacement,
-    } = this;
+    const { fileDiff: externalDiff, outgoingSessionDiff: pendingReplacement } =
+      this;
     if (
       pendingReplacement != null &&
       externalDiff != null &&
       !externalDiff.isPartial &&
-      this.editSessionDiff === pendingReplacement.editSessionDiff
+      this.editSessionDiff === pendingReplacement
     ) {
-      this.installExternalEditSession(externalDiff);
+      this.installEditSession(externalDiff);
     }
     const initialExternalDiff =
       this.editSessionDiff == null &&
@@ -1840,10 +1886,15 @@ export class FileDiff<
         ? externalDiff
         : undefined;
     if (initialExternalDiff != null) {
-      this.createInitialEditSession(editor, initialExternalDiff);
+      this.installEditSession(
+        initialExternalDiff,
+        editor.__getDocumentContents(getAdditionFile(initialExternalDiff)),
+        editor.__getDocumentSessionState()
+      );
     } else {
       this.hunksRenderer.beginEditSession(this.editSessionDiff);
     }
+    this.editor = editor;
     // The editor sync below refuses partial diffs (it needs the full file
     // contents); kick off hydration so the loaded re-render re-runs it.
     if (this.fileDiff?.isPartial === true) {
@@ -1867,15 +1918,6 @@ export class FileDiff<
       // syncs the render view once it paints.
       this.rerender();
     }
-    return (recycle: boolean = false) => {
-      this.editor = undefined;
-      // A recycle detach is a virtualized unmount mid-session: the session
-      // continues on remount, so hunks stay session-shaped. Only a
-      // non-recycle detach runs the exit recompute.
-      if (!recycle) {
-        this.finishEditSession();
-      }
-    };
   }
 
   // Session exit for the live detach path.
@@ -1885,32 +1927,30 @@ export class FileDiff<
   }
 
   /**
+   * @internal
+   *
    * Ends the edit session and settles which diff this component renders.
    * Requires the editor to be detached first. Does nothing when no session
    * exists, so callers can invoke it again safely after it has settled.
    *
-   * When the edited new-side text matches the external diff (including edits
-   * undone all the way back), the session is discarded without calling
-   * `onEditComplete`: the external diff stays, and annotations keep the
-   * session's collection so annotation writes made during the session
-   * survive.
-   *
-   * When the text changed, `onEditComplete` receives a fresh keyless
-   * `FileDiffMetadata` with fully recomputed hunks, alongside the current
-   * external diff, complete `oldFile`/`newFile` representations derived from
-   * the completed diff, and the session's annotations. Returning the event's
-   * `fileDiff` installs it as the new external value together with those
-   * annotations. Returning `null`, returning the exact `originalFileDiff`,
-   * or having no handler restores the external diff and its annotations. Any
-   * other return throws, as does an accepted diff reusing the replaced
-   * diff's `cacheKey` — in both cases the component still leaves the session
-   * on the external diff before the error propagates.
+   * `onEditComplete` receives the completed diff, current external diff,
+   * complete file pair, and both annotation collections even when the final
+   * text is unchanged. In `install` mode, accepting installs the completed diff
+   * and its annotations; rejecting or having no handler restores the external
+   * values. `discard` mode always restores the external values. An accepted
+   * diff cannot reuse the replaced diff's `cacheKey`.
    */
-  public completeEditSession(): void {
-    this.settleEditSession(true);
+  public __completeEditSession(
+    editor: DiffsEditor<LAnnotation>,
+    mode: 'install' | 'discard'
+  ): void {
+    this.settleEditSession(mode === 'install', editor);
   }
 
-  private settleEditSession(installResult: boolean): void {
+  private settleEditSession(
+    installResult: boolean,
+    editor: DiffsEditor<LAnnotation> | undefined
+  ): void {
     const {
       editSessionDiff,
       editSessionAnnotations,
@@ -1922,69 +1962,69 @@ export class FileDiff<
     }
     if (this.editor != null) {
       throw new Error(
-        'FileDiff.completeEditSession: detach the editor before completing the session'
+        'FileDiff.__completeEditSession: detach the editor before completing the session'
       );
     }
     this.hunksRenderer.endEditSession();
     this.finalizeEditSessionHunks();
 
     const sessionAnnotationsCurrent = editSessionAnnotations?.current;
-    const contentsChanged =
-      editSessionDiff.additionLines.join('') !==
-      externalDiff.additionLines.join('');
     let acceptedDiff: FileDiffMetadata | undefined;
     let acceptedOldFile: FileContents | null = null;
     let acceptedNewFile: FileContents | null = null;
     let failed = false;
     let failure: unknown;
-    if (contentsChanged) {
-      const completedDiff = cloneFileDiffMetadata(editSessionDiff);
-      const newFile: FileContents = {
-        name: completedDiff.name,
-        contents: completedDiff.additionLines.join(''),
-      };
-      if (completedDiff.lang != null) {
-        newFile.lang = completedDiff.lang;
-      }
-      const event: FileDiffEditCompleteEvent<LAnnotation> = {
-        fileDiff: completedDiff,
-        originalFileDiff: externalDiff,
-        oldFile:
-          completedDiff.type === 'new'
-            ? null
-            : {
-                name: completedDiff.prevName ?? completedDiff.name,
-                contents: completedDiff.deletionLines.join(''),
-              },
-        newFile,
-        lineAnnotations: sessionAnnotationsCurrent,
-        originalLineAnnotations: externalAnnotations,
-      };
-      const { onEditComplete } = this.options;
-      // Frozen so a handler cannot swap the event's fileDiff/originalFileDiff
-      // references; nested mutation (i.e. a fresh cacheKey on event.fileDiff)
-      // still works.
-      Object.freeze(event);
-      try {
-        const decision =
-          onEditComplete != null ? onEditComplete(event) : 'reject';
-        if (decision === 'accept') {
-          if (
-            completedDiff.cacheKey != null &&
-            completedDiff.cacheKey === externalDiff.cacheKey
-          ) {
-            throw new Error(
-              'FileDiff.completeEditSession: an accepted diff must not reuse the replaced diff cacheKey'
-            );
-          }
-          acceptedDiff = completedDiff;
-          acceptedOldFile = event.oldFile;
-          acceptedNewFile = event.newFile;
+    if (editor == null) {
+      throw new Error(
+        'FileDiff.__completeEditSession: editor is required for completion'
+      );
+    }
+    const completedDiff = cloneFileDiffMetadata(editSessionDiff);
+    const newFile: FileContents = {
+      name: completedDiff.name,
+      contents: completedDiff.additionLines.join(''),
+    };
+    if (completedDiff.lang != null) {
+      newFile.lang = completedDiff.lang;
+    }
+    const event: FileDiffEditCompleteEvent<LAnnotation> = {
+      fileDiff: completedDiff,
+      editor,
+      originalFileDiff: externalDiff,
+      oldFile:
+        completedDiff.type === 'new'
+          ? null
+          : {
+              name: completedDiff.prevName ?? completedDiff.name,
+              contents: completedDiff.deletionLines.join(''),
+            },
+      newFile,
+      lineAnnotations: sessionAnnotationsCurrent,
+      originalLineAnnotations: externalAnnotations,
+    };
+    // Frozen so a handler cannot swap the event's fileDiff/originalFileDiff
+    // references; nested mutation (i.e. a fresh cacheKey on event.fileDiff)
+    // still works.
+    Object.freeze(event);
+    try {
+      editor.__emitEditComplete(event);
+      const decision = this.options.onEditComplete?.(event);
+      if (decision === 'accept') {
+        if (
+          completedDiff.cacheKey != null &&
+          completedDiff.cacheKey === externalDiff.cacheKey
+        ) {
+          throw new Error(
+            'FileDiff.__completeEditSession: an accepted diff must not reuse the replaced diff cacheKey'
+          );
         }
-      } catch (error) {
-        failed = true;
-        failure = error;
+        acceptedDiff = completedDiff;
+        acceptedOldFile = event.oldFile;
+        acceptedNewFile = event.newFile;
       }
+    } catch (error) {
+      failed = true;
+      failure = error;
     }
 
     if (installResult && acceptedDiff != null) {
@@ -2000,17 +2040,10 @@ export class FileDiff<
       if (sessionAnnotationsCurrent != null) {
         this.lineAnnotations = sessionAnnotationsCurrent;
       }
-    } else if (
-      installResult &&
-      !contentsChanged &&
-      sessionAnnotationsCurrent != null
-    ) {
-      this.lineAnnotations = sessionAnnotationsCurrent;
     }
     this.editSessionDiff = undefined;
     this.editSessionAnnotations = undefined;
-    this.pendingEditSessionReplacement = undefined;
-    this.pendingPersistedDocumentRestore = undefined;
+    this.outgoingSessionDiff = undefined;
     if (installResult && this.fileContainer != null) {
       this.rerender();
     }
@@ -2026,7 +2059,7 @@ export class FileDiff<
    * the session render path — which also invalidates virtualized layout,
    * since nothing else does at exit now that editing does not flip
    * expandUnchanged. Marker-guarded and idempotent; CodeView also calls this
-   * when reaping a session whose detach closure was consumed by a recycle.
+   * when ending a session whose detach closure was consumed by a recycle.
    * Safe on a cleaned-up instance: the recompute is pure metadata work and
    * the deferred rerender is enabled-guarded. Returns true when a recompute
    * ran.
@@ -3890,6 +3923,14 @@ interface HasContentProps {
   fileDiff: FileDiffMetadata | undefined;
   oldFile: FileContents | null | undefined;
   newFile: FileContents | null | undefined;
+}
+
+function getAdditionFile(fileDiff: FileDiffMetadata): FileContents {
+  return {
+    name: fileDiff.name,
+    lang: fileDiff.lang,
+    contents: fileDiff.additionLines.join(''),
+  };
 }
 
 function areOptionalFilesEqual(

@@ -42,9 +42,12 @@ function createEditorStub(): DiffsEditor<undefined> {
     cleanUp() {},
     edit: () => () => {},
     __captureFocusForDOMReplacement() {},
+    __emitEditComplete() {},
+    __getDocumentContents: () => undefined,
+    __getDocumentSessionState: () => undefined,
     __postponeBgTokenizeToNextFrame() {},
     __syncRenderView() {},
-  };
+  } as unknown as DiffsEditor<undefined>;
 }
 
 function createDiff(name: string, marker: string): FileDiffMetadata {
@@ -151,7 +154,7 @@ test('a dirty unkeyed session remains authoritative when the same object is re-p
   try {
     instance.render({ fileDiff: externalDiff, fileContainer });
     await waitForStableRow(fileContainer);
-    const detach = instance.attachEditor(createEditorStub());
+    const detach = instance.__attachEditor(createEditorStub());
     instance.updateRenderCache(
       new Map<number, HighlightedToken[]>([
         [0, [[0, '', 'const editedMarker = 3;']]],

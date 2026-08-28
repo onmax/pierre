@@ -50,9 +50,12 @@ function createEditorStub(): DiffsEditor<string> {
     cleanUp() {},
     edit: () => () => {},
     __captureFocusForDOMReplacement() {},
+    __emitEditComplete() {},
+    __getDocumentContents: () => undefined,
+    __getDocumentSessionState: () => undefined,
     __postponeBgTokenizeToNextFrame() {},
     __syncRenderView() {},
-  };
+  } as unknown as DiffsEditor<string>;
 }
 
 async function waitForRenderedCode(container: HTMLElement): Promise<void> {
@@ -76,7 +79,7 @@ describe('FileDiff unified edit separators', () => {
 
   test('applyDocumentChange refreshes function hunk separators from the session diff', async () => {
     const { cleanup } = installDom();
-    let detach: (() => void) | undefined;
+    let detach: ReturnType<FileDiff<string>['__attachEditor']> | undefined;
     let instance: FileDiff<string> | undefined;
     try {
       const fileDiff = createTwoHunkDiff();
@@ -99,7 +102,7 @@ describe('FileDiff unified edit separators', () => {
         deferManagers: true,
       });
       await waitForRenderedCode(fileContainer);
-      detach = instance.attachEditor(createEditorStub());
+      detach = instance.__attachEditor(createEditorStub());
 
       const initialSeparatorCount = countSeparatorSlots(fileContainer);
       expect(initialSeparatorCount).toBeGreaterThan(0);

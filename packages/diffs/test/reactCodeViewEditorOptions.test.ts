@@ -33,6 +33,7 @@ import type {
   DiffsEditor,
   EditCompletionDecision,
   EditorChangeEvent,
+  EditorDocumentKind,
   FileContents,
 } from '../src/types';
 import { parseDiffFromFile } from '../src/utils/parseDiffFromFile';
@@ -81,7 +82,10 @@ function createTrackedEditor(
   options: EditorOptions<undefined>,
   attachmentError?: Error
 ): TrackedCodeViewEditor {
-  let detach: ((recycle?: boolean) => void) | undefined;
+  let detach:
+    | ReturnType<DiffsEditableComponent<undefined>['__attachEditor']>
+    | undefined;
+  let sessionOwner: DiffsEditableComponent<undefined> | undefined;
   const editor = {
     options,
     edits: [],
@@ -91,20 +95,22 @@ function createTrackedEditor(
       file: FileContents,
       lineAnnotations?: DiffLineAnnotation<undefined>[]
     ) {
-      options.onChange?.({ changes: [], file, lineAnnotations });
+      options.onChange?.({ changes: [], editor, file, lineAnnotations });
     },
+    getViewState: () => ({}),
     edit(instance: DiffsEditableComponent<undefined>) {
       editor.edits.push(instance);
-      detach = instance.attachEditor(editor);
+      if (sessionOwner != null && sessionOwner !== instance) {
+        throw new Error('TrackedCodeViewEditor: recycled component changed');
+      }
+      if (sessionOwner == null) {
+        sessionOwner = instance;
+        detach = instance.__attachEditor(editor);
+      }
       if (attachmentError != null) {
         throw attachmentError;
       }
-      // Mirror the real editor's disposer: tear down, then complete the
-      // session on the attached instance.
-      return () => {
-        editor.cleanUp('complete');
-        instance.completeEditSession();
-      };
+      return () => editor.cleanUp('complete');
     },
     cleanUp(reason: 'discard' | 'recycle' | 'complete' = 'discard') {
       if (reason === 'recycle') {
@@ -112,10 +118,23 @@ function createTrackedEditor(
       } else {
         editor.fullCleanUps += 1;
       }
-      detach?.(reason === 'recycle');
-      detach = undefined;
+      if (reason !== 'recycle') {
+        try {
+          detach?.();
+          sessionOwner?.__completeEditSession(
+            editor,
+            reason === 'complete' ? 'install' : 'discard'
+          );
+        } finally {
+          detach = undefined;
+          sessionOwner = undefined;
+        }
+      }
     },
     __captureFocusForDOMReplacement() {},
+    __emitEditComplete() {},
+    __getDocumentContents: () => undefined,
+    __getDocumentSessionState: () => undefined,
     __postponeBgTokenizeToNextFrame() {},
     __syncRenderView() {},
   } as unknown as TrackedCodeViewEditor;
@@ -146,14 +165,28 @@ function setSessionText(editor: TrackedCodeViewEditor, contents: string): void {
 
 function createEditorHarness(attachmentError?: Error) {
   const editors: TrackedCodeViewEditor[] = [];
+  const receivedDocumentKinds: EditorDocumentKind[] = [];
   const receivedOptions: EditorOptions<undefined>[] = [];
-  const createEditor: CreateEditor<undefined> = (options) => {
+  const receivedEditStateKeys: Array<string | undefined> = [];
+  const createEditor: CreateEditor<undefined> = (
+    documentKind,
+    options,
+    editStateKey
+  ) => {
+    receivedDocumentKinds.push(documentKind);
     receivedOptions.push(options);
+    receivedEditStateKeys.push(editStateKey);
     const editor = createTrackedEditor(options, attachmentError);
     editors.push(editor);
-    return editor;
+    return editor as unknown as DiffsEditor<undefined>;
   };
-  return { createEditor, editors, receivedOptions };
+  return {
+    createEditor,
+    editors,
+    receivedDocumentKinds,
+    receivedEditStateKeys,
+    receivedOptions,
+  };
 }
 
 function makeFileItem(
@@ -370,7 +403,13 @@ describe('React CodeView editor factory', () => {
     const cleanupActEnvironment = installReactActEnvironment();
     const container = document.createElement('div');
     document.body.appendChild(container);
-    const { createEditor, editors, receivedOptions } = createEditorHarness();
+    const {
+      createEditor,
+      editors,
+      receivedDocumentKinds,
+      receivedEditStateKeys,
+      receivedOptions,
+    } = createEditorHarness();
     const attemptedOnChange = mock(() => {});
     const onAttach = mock(() => {});
     const onItemEditChange = mock(
@@ -397,6 +436,7 @@ describe('React CodeView editor factory', () => {
           createEditor,
           createCodeViewElement({
             editorOptions,
+            getEditStateKey: (item) => `history:${item.id}`,
             items: [makeFileItem('a', { edit: true }), makeDiffItem('b', true)],
             onItemEditChange,
           })
@@ -405,6 +445,8 @@ describe('React CodeView editor factory', () => {
 
       expect(editors).toHaveLength(2);
       expect(new Set(editors).size).toBe(2);
+      expect(receivedDocumentKinds).toEqual(['file', 'file-diff']);
+      expect(receivedEditStateKeys).toEqual(['history:a', 'history:b']);
       expect(receivedOptions).toHaveLength(2);
       for (const options of receivedOptions) {
         expect(options.historyMaxEntries).toBe(17);
@@ -423,10 +465,12 @@ describe('React CodeView editor factory', () => {
       expect(onItemEditChange.mock.calls[0]?.[0].file.contents).toBe(
         'edited a'
       );
+      expect(onItemEditChange.mock.calls[0]?.[0].editor).toBe(editors[0]);
       expect(onItemEditChange.mock.calls[1]?.[1].id).toBe('b');
       expect(onItemEditChange.mock.calls[1]?.[0].file.contents).toBe(
         'edited b'
       );
+      expect(onItemEditChange.mock.calls[1]?.[0].editor).toBe(editors[1]);
     } finally {
       await unmountRoot(root);
       cleanupActEnvironment();
@@ -434,7 +478,7 @@ describe('React CodeView editor factory', () => {
     }
   });
 
-  test('uses replacement factories and editor options only for later sessions', async () => {
+  test('uses replacement factories, options, and keys only for later sessions', async () => {
     const { cleanup } = installCodeViewDom();
     const cleanupActEnvironment = installReactActEnvironment();
     const container = document.createElement('div');
@@ -447,7 +491,8 @@ describe('React CodeView editor factory', () => {
     const render = async (
       item: CodeViewItem<undefined>,
       createEditor: CreateEditor<undefined>,
-      historyMaxEntries: number
+      historyMaxEntries: number,
+      getEditStateKey: (item: CodeViewItem<undefined>) => string
     ) => {
       await renderRoot(
         root!,
@@ -455,6 +500,7 @@ describe('React CodeView editor factory', () => {
           createEditor,
           createCodeViewElement({
             editorOptions: { historyMaxEntries },
+            getEditStateKey,
             items: [item],
           })
         )
@@ -463,11 +509,22 @@ describe('React CodeView editor factory', () => {
 
     try {
       root = createReactRoot(container);
-      await render(baseItem, first.createEditor, 10);
+      await render(
+        baseItem,
+        first.createEditor,
+        10,
+        (item) => `first:${item.id}`
+      );
       expect(first.editors).toHaveLength(1);
       expect(first.receivedOptions[0]?.historyMaxEntries).toBe(10);
+      expect(first.receivedEditStateKeys).toEqual(['first:a']);
 
-      await render(baseItem, second.createEditor, 20);
+      await render(
+        baseItem,
+        second.createEditor,
+        20,
+        (item) => `second:${item.id}`
+      );
       expect(first.editors).toHaveLength(1);
       expect(second.editors).toHaveLength(0);
       expect(first.editors[0].fullCleanUps).toBe(0);
@@ -475,17 +532,20 @@ describe('React CodeView editor factory', () => {
       await render(
         { ...baseItem, edit: false, version: 1 },
         second.createEditor,
-        20
+        20,
+        (item) => `second:${item.id}`
       );
       expect(first.editors[0].fullCleanUps).toBeGreaterThanOrEqual(1);
 
       await render(
         { ...baseItem, edit: true, version: 2 },
         second.createEditor,
-        20
+        20,
+        (item) => `second:${item.id}`
       );
       expect(second.editors).toHaveLength(1);
       expect(second.receivedOptions[0]?.historyMaxEntries).toBe(20);
+      expect(second.receivedEditStateKeys).toEqual(['second:a']);
 
       await unmountRoot(root);
       root = undefined;
@@ -497,7 +557,7 @@ describe('React CodeView editor factory', () => {
     }
   });
 
-  test('completes only changed controlled sessions with their owning items', async () => {
+  test('completes controlled sessions with their owning items', async () => {
     const { cleanup } = installCodeViewDom();
     const cleanupActEnvironment = installReactActEnvironment();
     const container = document.createElement('div');
@@ -507,7 +567,8 @@ describe('React CodeView editor factory', () => {
     const onItemEditComplete = mock(
       (
         _event: ItemCompletionEvent,
-        _item: CodeViewItem<undefined>
+        _item: CodeViewItem<undefined>,
+        _nextItem: CodeViewItem<undefined>
       ): EditCompletionDecision => 'reject'
     );
     const editOffItem = makeFileItem('edit-off', {
@@ -567,16 +628,20 @@ describe('React CodeView editor factory', () => {
       const unchangedEnd = { ...unchangedItem, edit: false, version: 1 };
       await render([editOffEnd, collapsedEnd, unchangedEnd]);
 
-      // Edit-off and removal complete; collapse suspends its session and the
-      // unchanged session ends without an event.
-      expect(onItemEditComplete).toHaveBeenCalledTimes(2);
+      // Edit-off, removal, and the unchanged edit complete. Collapse suspends
+      // its session.
+      expect(onItemEditComplete).toHaveBeenCalledTimes(3);
       const completions = new Map(
         onItemEditComplete.mock.calls.map(([event, item]) => [
           item.id,
           { event, item },
         ])
       );
-      expect([...completions.keys()].sort()).toEqual(['edit-off', 'removed']);
+      expect([...completions.keys()].sort()).toEqual([
+        'edit-off',
+        'removed',
+        'unchanged',
+      ]);
       expect(fileEventContents(completions.get('edit-off')?.event)).toBe(
         'edit-off contents'
       );
@@ -585,7 +650,9 @@ describe('React CodeView editor factory', () => {
         'removed contents'
       );
       expect(completions.get('removed')?.item).toBe(removedItem);
-      expect(collapsedEditor!.fullCleanUps).toBe(1);
+      expect(completions.get('unchanged')?.item).toBe(unchangedEnd);
+      expect(collapsedEditor!.recycleCleanUps).toBe(1);
+      expect(collapsedEditor!.fullCleanUps).toBe(0);
       expect(handle.current?.getEditor('collapsed')).toBe(collapsedEditor);
     } finally {
       await unmountRoot(root);
@@ -594,7 +661,7 @@ describe('React CodeView editor factory', () => {
     }
   });
 
-  test('completes a changed session when a controlled empty list removes every item', async () => {
+  test('completes every session when a controlled empty list removes all items', async () => {
     const { cleanup } = installCodeViewDom();
     const cleanupActEnvironment = installReactActEnvironment();
     const container = document.createElement('div');
@@ -604,7 +671,8 @@ describe('React CodeView editor factory', () => {
     const onItemEditComplete = mock(
       (
         _event: ItemCompletionEvent,
-        _item: CodeViewItem<undefined>
+        _item: CodeViewItem<undefined>,
+        _nextItem: CodeViewItem<undefined>
       ): EditCompletionDecision => 'reject'
     );
     const changedItem = makeFileItem('changed', { edit: true, lineCount: 2 });
@@ -641,11 +709,15 @@ describe('React CodeView editor factory', () => {
       await render([]);
 
       expect(editors.every((editor) => editor.fullCleanUps > 0)).toBe(true);
-      expect(onItemEditComplete).toHaveBeenCalledTimes(1);
-      expect(onItemEditComplete.mock.calls[0]?.[1]).toBe(changedItem);
-      expect(fileEventContents(onItemEditComplete.mock.calls[0]?.[0])).toBe(
+      expect(onItemEditComplete).toHaveBeenCalledTimes(2);
+      const completions = new Map(
+        onItemEditComplete.mock.calls.map(([event, item]) => [item.id, event])
+      );
+      expect(completions.get(changedItem.id)?.editor).toBe(changedEditor);
+      expect(fileEventContents(completions.get(changedItem.id))).toBe(
         'changed contents'
       );
+      expect(completions.has(unchangedItem.id)).toBe(true);
     } finally {
       await unmountRoot(root);
       cleanupActEnvironment();

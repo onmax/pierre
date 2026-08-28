@@ -83,7 +83,7 @@ async function createDiffEditorFixture(
   });
   const oldFile: FileContents = { name: 'edit.ts', contents: oldContents };
   const newFile: FileContents = { name: 'edit.ts', contents: newContents };
-  const editor = new Editor<undefined>();
+  const editor = new Editor<undefined>('file-diff');
 
   fileDiff.render({
     oldFile,
@@ -193,7 +193,7 @@ describe('diff editor: empty document', () => {
         }
 
         expect(fixture.fileDiff.fileDiff?.additionLines).toEqual([]);
-        expect(getEditSessionDiff(fixture.fileDiff)?.additionLines).toEqual([]);
+        expect(getEditSessionDiff(fixture.fileDiff)).toBeUndefined();
         const content = findAdditionContent(fixture.container);
         expect(content == null ? 0 : countEditableLineEls(content)).toBe(0);
       } finally {

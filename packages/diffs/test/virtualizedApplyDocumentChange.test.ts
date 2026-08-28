@@ -55,9 +55,12 @@ function createEditorStub(): DiffsEditor<undefined> {
     cleanUp() {},
     edit: () => () => {},
     __captureFocusForDOMReplacement() {},
+    __emitEditComplete() {},
+    __getDocumentContents: () => undefined,
+    __getDocumentSessionState: () => undefined,
     __postponeBgTokenizeToNextFrame() {},
     __syncRenderView() {},
-  };
+  } as unknown as DiffsEditor<undefined>;
 }
 
 class BufferRecordingFile extends VirtualizedFile<undefined> {
@@ -98,7 +101,7 @@ describe('applyDocumentChange buffer updates', () => {
     );
     advancedInstance.updateCodeViewLayout(makeFile(50), 0);
     const detachAdvancedEditor =
-      advancedInstance.attachEditor(createEditorStub());
+      advancedInstance.__attachEditor(createEditorStub());
     setRenderedEditSession(advancedInstance);
     advancedInstance.seedRenderRange(seeded);
     advancedInstance.applyDocumentChange(makeDocument(1), undefined, true);
@@ -111,7 +114,8 @@ describe('applyDocumentChange buffer updates', () => {
       createStubVirtualizer('simple')
     );
     simpleInstance.updateCodeViewLayout(makeFile(50), 0);
-    const detachSimpleEditor = simpleInstance.attachEditor(createEditorStub());
+    const detachSimpleEditor =
+      simpleInstance.__attachEditor(createEditorStub());
     setRenderedEditSession(simpleInstance);
     simpleInstance.seedRenderRange(seeded);
     simpleInstance.applyDocumentChange(makeDocument(1), undefined, true);

@@ -13,10 +13,9 @@ import type {
   FileDiffLoadedFiles,
   FileDiffMetadata,
   HighlightedToken,
-  SyncRenderViewProps,
 } from '../src/types';
 import type { WorkerPoolManager } from '../src/worker';
-import { installDom, wait, waitFor } from './domHarness';
+import { installDom, wait } from './domHarness';
 import { assertDefined, createDeferred } from './testUtils';
 
 afterAll(async () => {
@@ -59,15 +58,17 @@ class TestFileDiff extends FileDiff<undefined> {
   }
 }
 
-function createEditorStub(cachedContents?: string): DiffsEditor<undefined> {
+function createEditorStub(): DiffsEditor<undefined> {
   return {
     cleanUp() {},
     edit: () => () => {},
     __captureFocusForDOMReplacement() {},
-    __getCachedDocumentContents: () => cachedContents,
+    __emitEditComplete() {},
+    __getDocumentContents: () => undefined,
+    __getDocumentSessionState: () => undefined,
     __postponeBgTokenizeToNextFrame() {},
     __syncRenderView() {},
-  };
+  } as unknown as DiffsEditor<undefined>;
 }
 
 function makeDirtyLines(
@@ -314,7 +315,7 @@ describe('FileDiff partial hydration', () => {
         return deferred.promise;
       },
     });
-    let detach: (() => void) | undefined;
+    let detach: ReturnType<TestFileDiff['__attachEditor']> | undefined;
 
     try {
       instance.render({
@@ -322,7 +323,7 @@ describe('FileDiff partial hydration', () => {
         fileContainer,
         forceRender: true,
       });
-      detach = instance.attachEditor(createEditorStub());
+      detach = instance.__attachEditor(createEditorStub());
 
       const partialSession = instance.getLatestDiffForTest();
       expect(partialSession).toBeDefined();
@@ -372,7 +373,7 @@ describe('FileDiff partial hydration', () => {
       disableFileHeader: true,
       loadDiffFiles: () => deferred.promise,
     });
-    let detach: ((recycle?: boolean) => void) | undefined;
+    let detach: ReturnType<TestFileDiff['__attachEditor']> | undefined;
     let loadPromise: Promise<void> | undefined;
 
     try {
@@ -382,7 +383,7 @@ describe('FileDiff partial hydration', () => {
         fileContainer,
         forceRender: true,
       });
-      detach = instance.attachEditor(createEditorStub());
+      detach = instance.__attachEditor(createEditorStub());
       loadPromise = instance.getPendingFileLoadPromiseForTest();
       assertDefined(loadPromise, 'expected partial hydration to be pending');
 
@@ -417,77 +418,6 @@ describe('FileDiff partial hydration', () => {
     }
   });
 
-  test('a hydrated diff starts its private edit model from cached contents', async () => {
-    const { cleanup } = installDom();
-    const { oldFile, newFile, partial } = createPartialChange('persisted.ts');
-    partial.cacheKey = 'external:persisted-partial';
-    const cachedContents = [
-      'local start\n',
-      'keep 1\n',
-      'new value\n',
-      'keep 3\n',
-      'keep 4\n',
-    ].join('');
-    const deferred = createDeferred<FileDiffLoadedFiles>();
-    const fileContainer = document.createElement('div');
-    document.body.appendChild(fileContainer);
-    const instance = new TestFileDiff({
-      disableErrorHandling: true,
-      disableFileHeader: true,
-      loadDiffFiles: () => deferred.promise,
-    });
-    const syncedViews: SyncRenderViewProps<undefined>[] = [];
-    const editor = createEditorStub(cachedContents);
-    editor.__syncRenderView = (props) => syncedViews.push(props);
-    let detach: (() => void) | undefined;
-
-    try {
-      instance.render({
-        fileDiff: partial,
-        fileContainer,
-        forceRender: true,
-      });
-      detach = instance.attachEditor(editor);
-
-      const loadPromise = instance.getPendingFileLoadPromiseForTest();
-      expect(loadPromise).toBeDefined();
-      deferred.resolve({ oldFile, newFile });
-      await loadPromise;
-
-      const restoredDiff = instance.getLatestDiffForTest();
-      expect(restoredDiff).toBeDefined();
-      expect(restoredDiff).not.toBe(partial);
-      expect(restoredDiff?.cacheKey).toBeUndefined();
-      expect(restoredDiff?.additionLines.join('')).toBe(cachedContents);
-      expect(restoredDiff?.additionLines).not.toBe(partial.additionLines);
-      expect(restoredDiff?.deletionLines).toBe(partial.deletionLines);
-      expect(restoredDiff?.hunks).not.toBe(partial.hunks);
-      expect(restoredDiff?.editSessionDirty).toBe(true);
-      expect(partial.additionLines.join('')).toBe(newFile.contents);
-      expect(partial.deletionLines.join('')).toBe(oldFile.contents);
-      expect(partial.editSessionDirty).not.toBe(true);
-      await waitFor(() =>
-        syncedViews.some(
-          (view) => 'fileDiff' in view && view.restoredDocument !== undefined
-        )
-      );
-      expect(
-        syncedViews.filter(
-          (view) => 'fileDiff' in view && view.restoredDocument !== undefined
-        )
-      ).toEqual([
-        expect.objectContaining({
-          fileDiff: restoredDiff,
-          restoredDocument: newFile.contents,
-        }),
-      ]);
-    } finally {
-      detach?.();
-      instance.cleanUp();
-      cleanup();
-    }
-  });
-
   test('recycle reuses an in-flight edit-session hydration request', async () => {
     const { cleanup } = installDom();
     const { oldFile, newFile, partial } = createPartialChange(
@@ -507,8 +437,7 @@ describe('FileDiff partial hydration', () => {
         return deferred.promise;
       },
     });
-    let firstDetach: ((recycle?: boolean) => void) | undefined;
-    let secondDetach: (() => void) | undefined;
+    let detach: ReturnType<TestFileDiff['__attachEditor']> | undefined;
 
     try {
       instance.render({
@@ -516,9 +445,13 @@ describe('FileDiff partial hydration', () => {
         fileContainer,
         forceRender: true,
       });
-      const firstEditor = createEditorStub();
-      firstEditor.cleanUp = (reason) => firstDetach?.(reason === 'recycle');
-      firstDetach = instance.attachEditor(firstEditor);
+      const editor = createEditorStub();
+      editor.cleanUp = (reason) => {
+        if (reason !== 'recycle') {
+          detach?.();
+        }
+      };
+      detach = instance.__attachEditor(editor);
       const loadPromise = instance.getPendingFileLoadPromiseForTest();
       expect(loadPromise).toBeDefined();
       expect(loadCalls).toBe(1);
@@ -526,7 +459,7 @@ describe('FileDiff partial hydration', () => {
       instance.cleanUp(true);
       instance.virtualizedSetup();
       instance.rerender();
-      secondDetach = instance.attachEditor(createEditorStub());
+      instance.__resumeEditor(editor);
 
       expect(loadCalls).toBe(1);
       deferred.resolve({ oldFile, newFile });
@@ -549,7 +482,6 @@ describe('FileDiff partial hydration', () => {
       expect(hydratedSession?.deletionLines.join('')).toBe(oldFile.contents);
       expect(loadCalls).toBe(1);
     } finally {
-      secondDetach?.();
       instance.cleanUp();
       cleanup();
     }
@@ -570,7 +502,7 @@ describe('FileDiff partial hydration', () => {
         return deferred.promise;
       },
     });
-    let detach: (() => void) | undefined;
+    let detach: ReturnType<TestFileDiff['__attachEditor']> | undefined;
 
     try {
       instance.render({
@@ -578,7 +510,7 @@ describe('FileDiff partial hydration', () => {
         fileContainer,
         forceRender: true,
       });
-      detach = instance.attachEditor(createEditorStub());
+      detach = instance.__attachEditor(createEditorStub());
       const loadPromise = instance.getPendingFileLoadPromiseForTest();
       expect(loadPromise).toBeDefined();
       deferred.resolve({ oldFile: null, newFile });

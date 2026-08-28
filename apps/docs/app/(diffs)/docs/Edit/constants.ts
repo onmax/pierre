@@ -35,12 +35,12 @@ virtualizer.setup(root, content);
 const fileInstance = new VirtualizedFile(
   {
     theme: { dark: 'pierre-dark', light: 'pierre-light' },
-    // Per-surface live change stream (optional).
+    // Fired any time there's an edit to the document
     onEditChange(event) {
       console.log('change', event.file.name, event.lineAnnotations);
     },
-    // Runs once when a changed session ends. Return 'accept' to install the
-    // event's file, or 'reject' to revert.
+    // Runs once when a session ends. Return 'accept' to install the event's
+    // file and annotations, or 'reject' to revert.
     onEditComplete(event) {
       // Store the edited file so later renders use it, and don't reset back to
       // the stale original.
@@ -52,13 +52,13 @@ const fileInstance = new VirtualizedFile(
 );
 fileInstance.render({ file, containerWrapper: content });
 
-const editor = new Editor();
+const editor = new Editor('file');
 // Start an edit session
-editor.edit(fileInstance);
+const dispose = editor.edit(fileInstance);
 
-// Later, when the editor is no longer needed. Its disposer completes the
-// session — running onEditComplete — before tearing down.
-editor.cleanUp();`,
+// Later, complete the session and install an accepted result while the
+// component is still mounted.
+dispose();`,
   },
   options,
 };
@@ -141,12 +141,12 @@ function renderFromApplicationState() {
 
 renderFromApplicationState();
 
-const editor = new Editor<ThreadMetadata>();
-editor.edit(fileDiffInstance);
+const editor = new Editor<ThreadMetadata>('file-diff');
+const dispose = editor.edit(fileDiffInstance);
 
-// Later, when the editor is no longer needed. Its disposer completes the
-// session — running onEditComplete — before tearing down.
-editor.cleanUp();`,
+// Later, complete the session and install an accepted result while the
+// component is still mounted.
+dispose();`,
   },
   options,
 };
@@ -185,13 +185,13 @@ root.style.overflow = 'auto';
 
 const viewer = new CodeView<ThreadMetadata>({
   theme: { dark: 'pierre-dark', light: 'pierre-light' },
-  createEditor(options) {
-    return new Editor({
+  createEditor(documentKind, options, editStateKey) {
+    return new Editor(documentKind, {
       ...options,
       onAttach(editor) {
         editor.focus({ lineNumber: 'first-visible', preventScroll: true });
       },
-    });
+    }, editStateKey);
   },
   // nextItem is the accepted replacement CodeView built — new fileDiff and
   // annotations, edit: false, bumped version. Re-key the frozen event's value,
@@ -260,7 +260,7 @@ const button = document.getElementById('edit-button');
 
 async function edit(fileInstance: VirtualizedFile): Promise<() => void> {
   const { Editor } = await import('@pierre/diffs/edit');
-  const editor = new Editor();
+  const editor = new Editor('file');
   return editor.edit(fileInstance);
 }
 
@@ -277,7 +277,7 @@ export const EDIT_SELECTION_ACTION_EXAMPLE: PreloadFileOptions<undefined> = {
     name: 'editor_selection_action.ts',
     contents: `import { Editor } from '@pierre/diffs/edit';
 
-const editor = new Editor({
+const editor = new Editor('file', {
   enabledSelectionAction: true,
   // The popover appears after a user-created ranged selection.
   renderSelectionAction: (context) => {
@@ -321,78 +321,6 @@ export const EDIT_SELECTION_ACTION_CONTEXT_TYPE: PreloadFileOptions<undefined> =
     options,
   };
 
-export const EDIT_PERSIST_STATE_EXAMPLE: PreloadFileOptions<undefined> = {
-  file: {
-    name: 'editor_persist_state.ts',
-    contents: `import type { FileContents } from '@pierre/diffs';
-import { Editor } from '@pierre/diffs/edit';
-
-// Unique, stable cacheKeys identify each file's cached document and its
-// stored editor state.
-const fileA: FileContents = {
-  name: 'a.ts',
-  contents: 'export const a = 1;',
-  cacheKey: 'a.ts',
-};
-const fileB: FileContents = {
-  name: 'b.ts',
-  contents: 'export const b = 2;',
-  cacheKey: 'b.ts',
-};
-
-// \`fileInstance\` is a rendered File — see the Vanilla JS section above.
-const editor = new Editor({ persistState: true });
-editor.edit(fileInstance);
-fileInstance.render({ file: fileA });
-
-// ...the user edits, selects, and scrolls fileA...
-
-// Switching files caches fileA's document (contents + undo history) on the
-// editor and writes its selections and scroll offsets to the state storage.
-// fileB has no record yet, so its surface starts scrolled to the top.
-fileInstance.render({ file: fileB });
-
-// Switching back renders fileA's edited contents — even though the original
-// \`contents\` string is passed again — and restores its selections, scroll
-// position, and undo history.
-fileInstance.render({ file: fileA });`,
-  },
-  options,
-};
-
-export const EDIT_PERSIST_STATE_REACT_EXAMPLE: PreloadFileOptions<undefined> = {
-  file: {
-    name: 'editor_persist_state_react.tsx',
-    contents: `import type { FileContents } from '@pierre/diffs';
-import { Editor, type EditorOptions } from '@pierre/diffs/edit';
-import { type CreateEditor, EditProvider, File } from '@pierre/diffs/react';
-import { useCallback, useMemo } from 'react';
-
-// Editors are cached by \`editorOptions\` object identity, so the stable
-// options object below hands every file rendered here the same editor. Its
-// cached documents and default 'inMemory' state store live on that instance,
-// which is what lets per-file contents, selections, and scroll survive
-// surface remounts.
-export function PersistedEditor({ file }: { file: FileContents }) {
-  const createEditor = useCallback<CreateEditor<undefined>>(
-    (options) => new Editor(options),
-    []
-  );
-  const editorOptions = useMemo<EditorOptions<undefined>>(
-    () => ({ persistState: true }),
-    []
-  );
-
-  return (
-    <EditProvider createEditor={createEditor}>
-      <File file={file} edit editorOptions={editorOptions} />
-    </EditProvider>
-  );
-}`,
-  },
-  options,
-};
-
 export const EDIT_MARKER_TYPE: PreloadFileOptions<undefined> = {
   file: {
     name: 'marker.ts',
@@ -421,7 +349,7 @@ export const EDIT_MARKER_EXAMPLE: PreloadFileOptions<undefined> = {
     name: 'editor_markers.ts',
     contents: `import { Editor } from '@pierre/diffs/edit';
 
-const editor = new Editor();
+const editor = new Editor('file');
 editor.edit(fileInstance);
 
 // Apply diagnostics, e.g. from a linter or language server. Inlining the array
@@ -463,8 +391,12 @@ const file: FileContents = {
   contents: 'export const x = 1;',
 };
 
-function createEditor(options: EditorOptions<undefined>) {
-  return new Editor(options);
+function createEditor(
+  documentKind: 'file' | 'file-diff',
+  options: EditorOptions<undefined>,
+  editStateKey?: string
+) {
+  return new Editor(documentKind, options, editStateKey);
 }
 
 export function EditableFileWithHistoryToolbar() {
@@ -516,11 +448,11 @@ export const EDIT_REACT_CREATE_EDITOR_EXAMPLE: PreloadFileOptions<undefined> = {
   file: {
     name: 'editor_react_create_editor.tsx',
     contents: `const createEditor = useCallback<CreateEditor<undefined>>(
-  (surfaceOptions) =>
-    new Editor({
+  (documentKind, editorOptions, editStateKey) =>
+    new Editor(documentKind, {
       ...defaultEditorOptions,
-      ...surfaceOptions,
-    }),
+      ...editorOptions,
+    }, editStateKey),
   []
 );
 
@@ -540,28 +472,7 @@ return (
     <File
       file={file}
       edit={editing}
-      editorOptions={editorOptions}
-      onEditChange={handleChange}
-    />
-  </EditProvider>
-);`,
-  },
-  options,
-};
-
-export const EDIT_REACT_SHARED_EDITOR_EXAMPLE: PreloadFileOptions<undefined> = {
-  file: {
-    name: 'editor_react_shared_editor.tsx',
-    contents: `const editorOptions = useMemo<EditorOptions<undefined>>(
-  () => ({ persistState: true }),
-  []
-);
-
-return (
-  <EditProvider createEditor={createEditor}>
-    <File
-      file={activeFile}
-      edit
+      editStateKey="review:example.ts"
       editorOptions={editorOptions}
       onEditChange={handleChange}
     />
@@ -576,7 +487,7 @@ export const EDIT_REACT_EXAMPLE: PreloadFileOptions<undefined> = {
     name: 'editor_react.tsx',
     contents: `import type {
   FileContents,
-  FileEditCompleteEvent,
+  FileEditCompleteHandler,
   FileOptions,
 } from '@pierre/diffs';
 import { Editor, type EditorOptions } from '@pierre/diffs/edit';
@@ -602,8 +513,12 @@ const virtualizerStyle = {
   borderRadius: '0.5rem',
 } as const;
 
-function createEditor(options: EditorOptions<undefined>) {
-  return new Editor(options);
+function createEditor(
+  documentKind: 'file' | 'file-diff',
+  options: EditorOptions<undefined>,
+  editStateKey?: string
+) {
+  return new Editor(documentKind, options, editStateKey);
 }
 
 export function EditableFile() {
@@ -613,16 +528,16 @@ export function EditableFile() {
   const cancelled = useRef(false);
   const version = useRef(0);
 
-  // Runs once when a changed session ends. Return 'accept' to install the
-  // event's file, or 'reject' to revert.
-  const handleEditComplete = useCallback(
-    (event: FileEditCompleteEvent<undefined>) => {
+  // Runs once when a session ends. Return 'accept' to install the event's file
+  // and annotations, or 'reject' to revert.
+  const handleEditComplete = useCallback<FileEditCompleteHandler<undefined>>(
+    (event) => {
       if (cancelled.current) {
         cancelled.current = false;
         return 'reject';
       }
       // Accepting: stamp the new contents with a fresh cacheKey, store them,
-      // then accept — the surface installs the event's file.
+      // then accept; the component installs the event's file.
       version.current += 1;
       event.file.cacheKey = 'example:v' + version.current;
       setFile(event.file);
@@ -647,15 +562,24 @@ export function EditableFile() {
           >
             Cancel
           </button>
-          <button type="button" onClick={() => {
-            cancelled.current = false;
-            setEditing(false) 
-          }}>
+          <button
+            type="button"
+            onClick={() => {
+              cancelled.current = false;
+              setEditing(false);
+            }}
+          >
             Save
           </button>
         </>
       ) : (
-        <button type="button" onClick={() => setEditing(true)}>
+        <button
+          type="button"
+          onClick={() => {
+            cancelled.current = false;
+            setEditing(true);
+          }}
+        >
           Edit
         </button>
       )}
@@ -681,7 +605,7 @@ export const EDIT_REACT_FILE_DIFF_EXAMPLE: PreloadFileOptions<undefined> = {
     contents: `import {
   parseDiffFromFile,
   type DiffLineAnnotation,
-  type FileDiffEditCompleteEvent,
+  type FileDiffEditCompleteHandler,
   type FileDiffMetadata,
   type FileDiffOptions,
 } from '@pierre/diffs';
@@ -721,8 +645,12 @@ const virtualizerStyle = {
   borderRadius: '0.5rem',
 } as const;
 
-function createEditor(options: EditorOptions<ThreadMetadata>) {
-  return new Editor(options);
+function createEditor(
+  documentKind: 'file' | 'file-diff',
+  options: EditorOptions<ThreadMetadata>,
+  editStateKey?: string
+) {
+  return new Editor(documentKind, options, editStateKey);
 }
 
 export function EditableFileDiff() {
@@ -736,8 +664,10 @@ export function EditableFileDiff() {
 
   // On completion, accept the new diff and adopt the final annotation
   // collection, or revert.
-  const handleEditComplete = useCallback(
-    (event: FileDiffEditCompleteEvent<ThreadMetadata>) => {
+  const handleEditComplete = useCallback<
+    FileDiffEditCompleteHandler<ThreadMetadata>
+  >(
+    (event) => {
       if (cancelled.current) {
         cancelled.current = false;
         return 'reject';
@@ -769,15 +699,24 @@ export function EditableFileDiff() {
           >
             Cancel
           </button>
-          <button type="button" onClick={() => {
-            cancelled.current = false;
-            setEditing(false) 
-          }}>
+          <button
+            type="button"
+            onClick={() => {
+              cancelled.current = false;
+              setEditing(false);
+            }}
+          >
             Save
           </button>
         </>
       ) : (
-        <button type="button" onClick={() => setEditing(true)}>
+        <button
+          type="button"
+          onClick={() => {
+            cancelled.current = false;
+            setEditing(true);
+          }}
+        >
           Edit
         </button>
       )}
@@ -816,14 +755,13 @@ export function EditableFileDiff() {
 export const EDIT_REACT_CODE_VIEW_EXAMPLE: PreloadFileOptions<undefined> = {
   file: {
     name: 'editor_react_code_view.tsx',
-    contents: `import {
-  parseDiffFromFile,
-  type CodeViewDiffItem,
-  type CodeViewItem,
-  type FileDiffEditCompleteEvent,
-} from '@pierre/diffs';
+    contents: `import { parseDiffFromFile, type CodeViewItem } from '@pierre/diffs';
 import { Editor, type EditorOptions } from '@pierre/diffs/edit';
-import { CodeView, EditProvider } from '@pierre/diffs/react';
+import {
+  CodeView,
+  EditProvider,
+  type CodeViewItemEditCompleteHandler,
+} from '@pierre/diffs/react';
 import { useCallback, useState } from 'react';
 
 interface ThreadMetadata {
@@ -864,8 +802,12 @@ const editorOptions: EditorOptions<ThreadMetadata> = {
   },
 };
 
-function createEditor(options: EditorOptions<ThreadMetadata>) {
-  return new Editor(options);
+function createEditor(
+  documentKind: 'file' | 'file-diff',
+  options: EditorOptions<ThreadMetadata>,
+  editStateKey?: string
+) {
+  return new Editor(documentKind, options, editStateKey);
 }
 
 export function EditableCodeView() {
@@ -886,12 +828,10 @@ export function EditableCodeView() {
   // annotations, edit: false, and a bumped version. Mirror it into state and
   // return 'accept' (edit mode already managed the annotations), or 'reject' to
   // revert.
-  const commitEdit = useCallback(
-    (
-      event: FileDiffEditCompleteEvent<ThreadMetadata>,
-      item: CodeViewDiffItem<ThreadMetadata>,
-      nextItem: CodeViewDiffItem<ThreadMetadata>
-    ) => {
+  const commitEdit = useCallback<CodeViewItemEditCompleteHandler<ThreadMetadata>>(
+    (event, item, nextItem) => {
+      if (!('fileDiff' in event)) return 'reject';
+
       event.fileDiff.cacheKey = item.id + ':v' + nextItem.version;
       setItems((current) => {
         // We must insert the new item into our controlled array.
@@ -916,6 +856,7 @@ export function EditableCodeView() {
         items={items}
         style={codeViewStyle}
         editorOptions={editorOptions}
+        getEditStateKey={(item) => \`review:\${item.id}\`}
         onItemEditComplete={commitEdit}
         renderAnnotation={(annotation) => (
           <div>Thread {annotation.metadata.id}</div>
@@ -955,7 +896,7 @@ fileInstance.render({
   containerWrapper: document.body,
 });
 
-const editor = new Editor();
+const editor = new Editor('file');
 editor.edit(fileInstance);`,
   },
   options,
@@ -988,8 +929,12 @@ const highlighterOptions = {
   useTokenTransformer: true,
 } as const;
 
-function createEditor(options: EditorOptions<undefined>) {
-  return new Editor(options);
+function createEditor(
+  documentKind: 'file' | 'file-diff',
+  options: EditorOptions<undefined>,
+  editStateKey?: string
+) {
+  return new Editor(documentKind, options, editStateKey);
 }
 
 export function EditableFileWithWorkerPool() {
@@ -1023,26 +968,25 @@ export const EDITOR_OPTIONS_TYPE: PreloadFileOptions<undefined> = {
 } from '@pierre/diffs';
 import {
   Editor,
+  type EditorEditCompleteEvent,
+  type EditorInitialState,
   type EditorKeymap,
-  type IStateStorage,
 } from '@pierre/diffs/edit';
 
 interface EditorOptions<LAnnotation> {
   // Max undo stack entries
   historyMaxEntries?: number;
 
+  // Retain and restore vertical scroll only when this component exclusively owns
+  // its scrollable HTMLElement viewport. Captured by the constructor; defaults to false.
+  ownsVerticalViewport?: boolean;
+
+  // State to adopt on first attach. Only documentKind is required; omitted
+  // fields are initialized from the attached component.
+  initialState?: EditorInitialState<LAnnotation>;
+
   // Custom keymap checked before the default map.
   keymap?: EditorKeymap;
-
-  // Preserve each File's document and item-local editor state between renders.
-  // Requires every editable file to provide a unique, stable cacheKey.
-  // Default: false.
-  persistState?: boolean;
-
-  // Where serializable editor state is stored. Text documents and undo
-  // history remain in this Editor instance's in-memory cache.
-  // Defaults to 'inMemory' when persistState is enabled.
-  persistStateStorage?: 'inMemory' | 'indexedDB' | IStateStorage;
 
   // Render rounded corners on selection ranges (default: true)
   roundedSelection?: boolean;
@@ -1064,7 +1008,7 @@ interface EditorOptions<LAnnotation> {
   >;
 
   // Show the floating Selection Action popover after a user selection.
-  // Programmatic setSelections/setState calls do not open it (default: false).
+  // Programmatic setSelections/setViewState calls do not open it.
   enabledSelectionAction?: boolean;
 
   // Custom clipboard provider. Recommended in Electron apps — use the native
@@ -1083,10 +1027,15 @@ interface EditorOptions<LAnnotation> {
   ) => void;
 
   // Editor-centric change stream. Fires after each edit with an
-  // EditorChangeEvent carrying the live file/fileDiff, the current
-  // lineAnnotations, and normalized text changes. Prefer a component's
-  // onEditChange prop/option for per-component handling.
+  // EditorChangeEvent carrying the editor, live file (the editable new side for
+  // a diff), current lineAnnotations, and normalized text changes. Prefer a
+  // component's onEditChange prop/option for per-component handling.
   onChange?: (event: EditorChangeEvent<LAnnotation, 'file' | 'diff'>) => void;
+
+  // Editor-wide completion observer. Receives the same frozen event before the
+  // component callback and fires even when that callback is missing. You cannot
+  // accept or reject from this callback.
+  onComplete?: (event: EditorEditCompleteEvent<LAnnotation>) => void;
 
   // Fires when the editable content area gains focus (tab, click, or editor.focus()).
   onFocus?: () => void;
@@ -1119,13 +1068,13 @@ export const EDIT_ON_ATTACH_VANILLA_EXAMPLE: PreloadFileOptions<undefined> = {
   file: {
     name: 'editor_on_attach_vanilla.ts',
     contents: `const viewer = new CodeView({
-  createEditor(options) {
-    return new Editor({
+  createEditor(documentKind, options, editStateKey) {
+    return new Editor(documentKind, {
       ...options,
       onAttach(editor) {
         editor.focus({ lineNumber: 'first-visible', preventScroll: true });
       },
-    });
+    }, editStateKey);
   },
 });`,
   },
@@ -1142,24 +1091,155 @@ export const EDIT_FOCUS_POSITION_EXAMPLE: PreloadFileOptions<undefined> = {
 
 export const EDIT_ON_CHANGE_EXAMPLE: PreloadFileOptions<undefined> = {
   file: {
-    name: 'editor_on_change.ts',
-    contents: `import { Editor } from '@pierre/diffs/edit';
+    name: 'edit_component_handlers.tsx',
+    contents: `import type {
+  FileContents,
+  FileEditCompleteHandler,
+} from '@pierre/diffs';
+import { File } from '@pierre/diffs/react';
+import { useState } from 'react';
 
-// The same EditorChangeEvent reaches a component's onEditChange prop/option.
-// Generally you should avoid using this API unless you're using the Editor API
-// more directly
-new Editor({
-  onChange: (event) => {
-    // \`event.file\` (or \`event.fileDiff\`) is the live document, and
-    // \`event.lineAnnotations\` the current collection. \`event.changes\` lists
-    // every normalized edit.
-    event.changes.forEach((change) => {
-      console.log('Text inserted/replaced:', change.text);
-      console.log('Range of the edit:', change.range); // { start: { line, character }, end: { line, character } }
-      console.log('Offset of the change:', change.start, change.end);
-    });
+const initialFile: FileContents = {
+  name: 'example.ts',
+  contents: 'export const answer = 42;',
+};
+
+// Render inside the stable EditProvider shown above.
+export function EditableFileHandlers() {
+  const [file, setFile] = useState(initialFile);
+
+  const handleEditComplete: FileEditCompleteHandler<undefined> = (event) => {
+    if (!window.confirm('Keep these changes?')) {
+      return 'reject';
+    }
+
+    // Keep application state aligned with the value installed by the component.
+    setFile(event.file);
+    return 'accept';
+  };
+
+  return (
+    <File
+      file={file}
+      edit
+      onEditChange={(event) => {
+        console.log('Current contents:', event.file.contents);
+        console.log('Normalized edits:', event.changes);
+      }}
+      onEditComplete={handleEditComplete}
+    />
+  );
+}`,
   },
-});`,
+  options,
+};
+
+export const EDIT_PERSISTED_DRAFT_EXAMPLE: PreloadFileOptions<undefined> = {
+  file: {
+    name: 'persisted_edit_draft.tsx',
+    contents: `import {
+  getFiletypeFromFileName,
+  type EditorViewState,
+  type FileContents,
+} from '@pierre/diffs';
+import {
+  TextDocument,
+  type Editor,
+  type EditorOptions,
+} from '@pierre/diffs/edit';
+import { File } from '@pierre/diffs/react';
+import { useRef, useState } from 'react';
+
+const storageKey = 'draft:example.ts';
+const initialFile: FileContents = {
+  name: 'example.ts',
+  contents: 'export const answer = 42;',
+};
+
+interface PersistedDraft {
+  file: FileContents;
+  editorState?: EditorViewState;
+}
+
+function loadDraft(): PersistedDraft {
+  const value = localStorage.getItem(storageKey);
+  return value == null
+    ? { file: initialFile }
+    : (JSON.parse(value) as PersistedDraft);
+}
+
+function persistDraft(file: FileContents, editor: Editor<undefined>) {
+  const draft: PersistedDraft = {
+    file,
+    editorState: editor.getViewState(),
+  };
+  localStorage.setItem(storageKey, JSON.stringify(draft));
+}
+
+// Render inside the stable EditProvider shown above.
+export function PersistedEditableFile() {
+  const [initialDraft] = useState(loadDraft);
+  const [file, setFile] = useState(initialDraft.file);
+  const [editing, setEditing] = useState(true);
+  const editorRef = useRef<Editor<undefined> | null>(null);
+  const [editorOptions] = useState<EditorOptions<undefined>>(() => ({
+    // Initialize the edit state from the latest version of the file, minus
+    // undo history
+    initialState: {
+      documentKind: 'file',
+      document: new TextDocument<undefined>(
+        initialDraft.file.name,
+        initialDraft.file.contents,
+        initialDraft.file.lang ?? getFiletypeFromFileName(initialDraft.file.name)
+      ),
+      fileInfo: {
+        name: initialDraft.file.name,
+        lang: initialDraft.file.lang,
+      },
+      editor: initialDraft.editorState,
+    },
+    onAttach(editor) {
+      editorRef.current = editor;
+    },
+  }));
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => {
+          const editor = editorRef.current;
+          const currentFile = editor?.getFile();
+          if (editor != null && currentFile != null) {
+            // Captures the exact document, selections, and scroll position.
+            persistDraft(currentFile, editor);
+          }
+        }}
+      >
+        Save draft
+      </button>
+      <button type="button" onClick={() => setEditing(false)}>
+        Finish editing
+      </button>
+      <File
+        file={file}
+        edit={editing}
+        editorOptions={editorOptions}
+        onEditChange={(event) => {
+          // Save the latest document and state without feeding them back into
+          // the component during its active editing session.
+          persistDraft(event.file, event.editor);
+        }}
+        onEditComplete={(event) => {
+          // Persist the accepted final file as the next canonical input.
+          setFile(event.file);
+          persistDraft(event.file, event.editor);
+          return 'accept';
+        }}
+      />
+    </>
+  );
+}`,
   },
   options,
 };
@@ -1169,13 +1249,18 @@ export const EDITOR_PUBLIC_API: PreloadFileOptions<undefined> = {
     name: 'editor_public_api.ts',
     contents: `import {
   File,
-  type EditorState,
+  type EditorViewState,
   type FileContents,
 } from '@pierre/diffs';
-import { Editor, type EditorFocusOptions } from '@pierre/diffs/edit';
+import {
+  Editor,
+  EditStateManager,
+  type EditState,
+  type EditorFocusOptions,
+} from '@pierre/diffs/edit';
 
 // Editor
-// Most methods require an attached surface via edit().
+// Most methods require an attached component via edit().
 
 const fileInstance = new File();
 fileInstance.render({
@@ -1183,29 +1268,18 @@ fileInstance.render({
   containerWrapper: document.body,
 });
 
-const editor = new Editor();
+const editStateKey = 'review:example.ts';
+const editor = new Editor('file', {}, editStateKey);
 
 // Merge partial options at runtime. Existing fields are preserved.
-// onChange and similar handlers read from the latest options on each call;
-// pass onFocus/onBlur before edit() attaches, or set them in the constructor.
 editor.setOptions({
-  onChange(event) {
-    // Observe the live document via event.file/event.fileDiff. Editing owns
-    // annotation positions during the session — no sync loop needed.
-    // Avoid using this API in favor of the \`onEditChange\` prop on
-    // File/FileDiff components directly
-    console.log(event.changes.length, 'change(s)');
-  },
+  roundedSelection: false,
 });
 
-// Attach to a rendered File, FileDiff, or virtualized variant.
+// This file-kind editor attaches to a rendered File or VirtualizedFile. Create
+// an Editor('file-diff', ...) for FileDiff or VirtualizedFileDiff.
 // Normalizes conflicting fileInstance options and returns a dispose function.
 const dispose = editor.edit(fileInstance);
-
-// Detach, remove listeners, and clean up injected editor DOM.
-// Pass recycle=true when a virtualized host is temporarily unmounting.
-editor.cleanUp();
-editor.cleanUp(true);
 
 // Apply text edits to the attached document. Positions are zero-based.
 // Edits always join the undo stack, exactly like typed input. The optional
@@ -1218,22 +1292,26 @@ editor.applyEdits([
   },
 ]);
 
-// Live FileContents for the attached document. Undefined when nothing is
-// attached.
+// Live FileContents for the current session or queued initialState. Undefined
+// when neither exists.
 const file: FileContents | undefined = editor.getFile();
 
-// Full document text, or '' when nothing is attached.
+// Full document text, or '' when no current session or initialState exists.
 const text: string = editor.getText();
 
 // Snapshot selections and scroll positions for explicit restoration:
-const state: EditorState = editor.getState();
-// EditorState = {
+const state: EditorViewState = editor.getViewState();
+// EditorViewState = {
 //   selections?: EditorSelection[];
 //   view?: { scrollLeft: number; scrollTop?: number };
 // }
 
 // Restore selections and scroll positions after re-rendering.
-editor.setState(state);
+editor.setViewState(state);
+
+// Borrow the complete live document, history, and editor-state checkpoint. This is
+// available only while a complete edit session exists.
+const editState: EditState<undefined> | undefined = editor.getEditState();
 
 // Replace all cursors and ranges programmatically. Positions are zero-based;
 // direction controls which end the caret uses for keyboard extension.
@@ -1282,6 +1360,28 @@ editor.canRedo;
 // Undo the last edit or redo the last undone edit. No-ops when history is empty.
 editor.undo();
 editor.redo();
+
+// End the session through the disposer returned by edit(). It detaches the
+// editor, then runs the component's onEditComplete accept/reject boundary.
+dispose();
+
+// cleanUp('discard') also runs completion, but never installs the result.
+// Virtualized hosts use cleanUp('recycle') for temporary remounts.
+
+// Inspect complete active or inactive state without changing LRU recency.
+EditStateManager.get('file', editStateKey);
+
+// Clear a complete inactive session, or keep its draft while resetting selected
+// parts. Active sessions are never mutated by manager clearing.
+EditStateManager.clear('file', editStateKey);
+EditStateManager.clear('file', editStateKey, { history: true });
+EditStateManager.clear('file', editStateKey, { selections: true });
+EditStateManager.clear('file', editStateKey, { view: true });
+EditStateManager.clear('file', editStateKey, { editor: true });
+
+// Clear all inactive state, or change each namespace's retained-state capacity.
+EditStateManager.clearAll();
+EditStateManager.setCapacity(50);
 `,
   },
   options,
@@ -1293,7 +1393,7 @@ export const EDIT_REACT_MULTI_FILE_DIFF_EXAMPLE: PreloadFileOptions<undefined> =
       name: 'editor_react_multi_file_diff.tsx',
       contents: `import type {
   FileContents,
-  FileDiffEditCompleteEvent,
+  FileDiffEditCompleteHandler,
   FileDiffOptions,
 } from '@pierre/diffs';
 import { Editor, type EditorOptions } from '@pierre/diffs/edit';
@@ -1326,8 +1426,12 @@ const virtualizerStyle = {
   borderRadius: '0.5rem',
 } as const;
 
-function createEditor(options: EditorOptions<undefined>) {
-  return new Editor(options);
+function createEditor(
+  documentKind: 'file' | 'file-diff',
+  options: EditorOptions<undefined>,
+  editStateKey?: string
+) {
+  return new Editor(documentKind, options, editStateKey);
 }
 
 export function EditableMultiFileDiff() {
@@ -1340,8 +1444,10 @@ export function EditableMultiFileDiff() {
   // MultiFileDiff parses its diff from the file pair. Adopt the completed files
   // into state (re-keyed) — MultiFileDiff reuses the accepted diff once the
   // props catch up — then return 'accept'; return 'reject' to revert.
-  const handleEditComplete = useCallback(
-    (event: FileDiffEditCompleteEvent<undefined>) => {
+  const handleEditComplete = useCallback<
+    FileDiffEditCompleteHandler<undefined>
+  >(
+    (event) => {
       if (cancelled.current) {
         cancelled.current = false;
         return 'reject';
@@ -1376,12 +1482,24 @@ export function EditableMultiFileDiff() {
           >
             Cancel
           </button>
-          <button type="button" onClick={() => setEditing(false)}>
+          <button
+            type="button"
+            onClick={() => {
+              cancelled.current = false;
+              setEditing(false);
+            }}
+          >
             Save
           </button>
         </>
       ) : (
-        <button type="button" onClick={() => setEditing(true)}>
+        <button
+          type="button"
+          onClick={() => {
+            cancelled.current = false;
+            setEditing(true);
+          }}
+        >
           Edit
         </button>
       )}
