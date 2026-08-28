@@ -144,13 +144,14 @@ class TestEditableComponent implements DiffsEditableComponent<undefined> {
   ): void {}
 
   #syncRenderView(): void {
-    this.#editor?.__syncRenderView(
-      createTestHighlighter(),
-      this.fileContainer,
-      this.#file,
-      this.#lineAnnotations,
-      this.#renderRange
-    );
+    this.#editor?.__syncRenderView({
+      highlighter: createTestHighlighter(),
+      fileContainer: this.fileContainer,
+      file: this.#file,
+      externalCacheKey: this.#file.cacheKey,
+      lineAnnotations: this.#lineAnnotations,
+      renderRange: this.#renderRange,
+    });
   }
 
   #renderShadowDom(): void {
@@ -268,13 +269,15 @@ describe('Editor onAttach lifecycle', () => {
       await wait(0);
       expect(onAttach).not.toHaveBeenCalled();
 
-      editor.__syncRenderView(
-        createTestHighlighter(),
-        component.fileContainer,
-        createFile(),
-        undefined,
-        undefined
-      );
+      const file = createFile();
+      editor.__syncRenderView({
+        highlighter: createTestHighlighter(),
+        fileContainer: component.fileContainer,
+        file,
+        externalCacheKey: file.cacheKey,
+        lineAnnotations: undefined,
+        renderRange: undefined,
+      });
       await wait(0);
 
       expect(onAttach).not.toHaveBeenCalled();

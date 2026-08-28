@@ -5,8 +5,15 @@ import { FileDiff } from '../src/components/FileDiff';
 import { DEFAULT_THEMES } from '../src/constants';
 import { Editor, type IStateStorage } from '../src/edit';
 import { disposeHighlighter } from '../src/highlighter/shared_highlighter';
-import type { EditorState, FileContents } from '../src/types';
+import type {
+  EditorChange,
+  EditorState,
+  FileContents,
+  FileDiffMetadata,
+} from '../src/types';
+import { parseDiffFromFile } from '../src/utils/parseDiffFromFile';
 import { installDom, wait, waitFor } from './domHarness';
+import { createDeferred } from './testUtils';
 
 afterAll(async () => {
   await disposeHighlighter();
@@ -23,17 +30,10 @@ interface AttachedFile {
   file: File<undefined>;
 }
 
-interface Deferred<T> {
-  promise: Promise<T>;
-  resolve(value: T): void;
-}
-
-function createDeferred<T>(): Deferred<T> {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
+class TestFileDiff extends FileDiff<undefined> {
+  getLatestDiffForTest(): FileDiffMetadata | undefined {
+    return this.getLatestDiff();
+  }
 }
 
 async function attachFile(
@@ -366,6 +366,70 @@ describe('Editor persisted state lifecycle', () => {
     }
   });
 
+  test('cached document contents require the same persisted identity', async () => {
+    const dom = installDom();
+    const editor = new Editor<undefined>({ persistState: true });
+    const editorWithoutPersistence = new Editor<undefined>();
+    let attached: AttachedFile | undefined;
+
+    try {
+      attached = await attachFile(editor, { ...ORIGINAL_FILE });
+      editor.applyEdits([
+        {
+          range: {
+            start: { line: 0, character: 0 },
+            end: { line: 0, character: 0 },
+          },
+          newText: 'X',
+        },
+      ]);
+      editor.cleanUp();
+
+      expect(
+        editor.__getCachedDocumentContents({
+          name: ORIGINAL_FILE.name,
+          cacheKey: ORIGINAL_FILE.cacheKey,
+        })
+      ).toBe('Xalpha\nbravo\n');
+      expect(
+        editor.__getCachedDocumentContents({
+          name: ORIGINAL_FILE.name,
+          cacheKey: ORIGINAL_FILE.cacheKey,
+        })
+      ).toBe('Xalpha\nbravo\n');
+      expect(
+        editor.__getCachedDocumentContents({
+          name: ORIGINAL_FILE.name,
+          cacheKey: 'another-document',
+        })
+      ).toBeUndefined();
+      expect(
+        editor.__getCachedDocumentContents({
+          name: 'renamed.ts',
+          cacheKey: ORIGINAL_FILE.cacheKey,
+        })
+      ).toBeUndefined();
+      expect(
+        editor.__getCachedDocumentContents({
+          name: ORIGINAL_FILE.name,
+          lang: 'css',
+          cacheKey: ORIGINAL_FILE.cacheKey,
+        })
+      ).toBeUndefined();
+      expect(
+        editorWithoutPersistence.__getCachedDocumentContents({
+          name: ORIGINAL_FILE.name,
+          cacheKey: ORIGINAL_FILE.cacheKey,
+        })
+      ).toBeUndefined();
+    } finally {
+      editor.cleanUp();
+      editorWithoutPersistence.cleanUp();
+      attached?.file.cleanUp();
+      dom.cleanup();
+    }
+  });
+
   test('a rename with the same cache key keeps text, state, and history', async () => {
     const dom = installDom();
     const editor = new Editor<undefined>({ persistState: true });
@@ -649,10 +713,9 @@ describe('Editor persisted state lifecycle', () => {
     }
   });
 
-  // Diffs persist only their serializable state, keyed by the cacheKey
-  // parseDiffFromFile derives from the file pair. A first attach has no
-  // record (reset to 0,0); a later fresh editor + fresh FileDiff for the same
-  // pair restores the persisted viewport position.
+  // Diff documents, history, and serializable editor state are stored under
+  // the cacheKey derived from the file pair. A first attach has no state record
+  // and resets to 0,0; a later FileDiff for the same pair restores its viewport.
   test('with persistState, a diff resets on first attach and restores on revisit', async () => {
     const dom = installDom();
     const editor = new Editor<undefined>({ persistState: true });
@@ -719,14 +782,23 @@ describe('Editor persisted state lifecycle', () => {
     }
   });
 
-  // A FileDiff renders straight from the host's metadata (no __prepareFile
-  // substitution like File), so a host that re-parses pristine metadata after
-  // edits — same derived cacheKey, original content — must get a document
-  // built from that metadata, not the edited cached one, or the rendered rows
-  // and the editing document would diverge.
-  test('a re-parsed pristine diff does not adopt the edited cached document', async () => {
+  test('a fresh FileDiff restores cached text into its private edit model', async () => {
     const dom = installDom();
-    const editor = new Editor<undefined>({ persistState: true });
+    const changes: Array<{
+      cacheKey: string | undefined;
+      changes: EditorChange[];
+      contents: string;
+    }> = [];
+    const editor = new Editor<undefined>({
+      persistState: true,
+      onChange(file, _lineAnnotations, event) {
+        changes.push({
+          cacheKey: file.cacheKey,
+          changes: event.changes,
+          contents: file.contents,
+        });
+      },
+    });
     const container = document.createElement('div');
     document.body.appendChild(container);
     const oldFile: FileContents = {
@@ -739,20 +811,24 @@ describe('Editor persisted state lifecycle', () => {
       contents: 'alpha\nbravo\n',
       cacheKey: 'diffed-reparse:new',
     };
-    const first = new FileDiff<undefined>({
+    const externalDiff = parseDiffFromFile(oldFile, newFile);
+    const externalBefore = structuredClone(externalDiff);
+    const externalAdditionLines = externalDiff.additionLines;
+    const externalDeletionLines = externalDiff.deletionLines;
+    const externalHunks = externalDiff.hunks;
+    const first = new TestFileDiff({
       disableErrorHandling: true,
       disableFileHeader: true,
       theme: DEFAULT_THEMES,
     });
-    const second = new FileDiff<undefined>({
+    const second = new TestFileDiff({
       disableErrorHandling: true,
       disableFileHeader: true,
       theme: DEFAULT_THEMES,
     });
     try {
       first.render({
-        oldFile,
-        newFile,
+        fileDiff: externalDiff,
         fileContainer: container,
         forceRender: true,
       });
@@ -768,20 +844,247 @@ describe('Editor persisted state lifecycle', () => {
         },
       ]);
       expect(editor.getText()).toBe('edited alpha\nbravo\n');
+      expect(changes.map((change) => change.contents)).toEqual([
+        'edited alpha\nbravo\n',
+      ]);
+      editor.cleanUp();
+      first.cleanUp();
+      container.innerHTML = '';
+      changes.length = 0;
+
+      second.render({
+        fileDiff: externalDiff,
+        fileContainer: container,
+        forceRender: true,
+      });
+      editor.edit(second);
+      await waitFor(
+        () =>
+          editor.getText() === 'edited alpha\nbravo\n' &&
+          container.shadowRoot?.querySelector('[data-content] [data-line="1"]')
+            ?.textContent === 'edited alpha' &&
+          changes.length === 1
+      );
+
+      const restoredDiff = second.getLatestDiffForTest();
+      expect(restoredDiff).toBeDefined();
+      expect(restoredDiff).not.toBe(externalDiff);
+      expect(restoredDiff?.cacheKey).toBeUndefined();
+      expect(restoredDiff?.additionLines.join('')).toBe(
+        'edited alpha\nbravo\n'
+      );
+      expect(restoredDiff?.additionLines).not.toBe(externalAdditionLines);
+      expect(restoredDiff?.deletionLines).toBe(externalDeletionLines);
+      expect(restoredDiff?.hunks).not.toBe(externalHunks);
+      expect(externalDiff.additionLines).toBe(externalAdditionLines);
+      expect(externalDiff.deletionLines).toBe(externalDeletionLines);
+      expect(externalDiff.hunks).toBe(externalHunks);
+      expect(externalDiff).toEqual(externalBefore);
+      expect(editor.canUndo).toBe(true);
+      expect(editor.canRedo).toBe(false);
+      expect(changes).toEqual([
+        {
+          cacheKey: undefined,
+          changes: [
+            {
+              start: 0,
+              end: 'alpha\nbravo\n'.length,
+              text: 'edited alpha\nbravo\n',
+              range: {
+                start: { line: 0, character: 0 },
+                end: { line: 2, character: 0 },
+              },
+            },
+          ],
+          contents: 'edited alpha\nbravo\n',
+        },
+      ]);
+
+      editor.undo();
+      expect(editor.getText()).toBe('alpha\nbravo\n');
+      expect(editor.canUndo).toBe(false);
+      expect(editor.canRedo).toBe(true);
+      editor.redo();
+      expect(editor.getText()).toBe('edited alpha\nbravo\n');
+      expect(changes.map((change) => change.contents)).toEqual([
+        'edited alpha\nbravo\n',
+        'alpha\nbravo\n',
+        'edited alpha\nbravo\n',
+      ]);
+      expect(externalDiff).toEqual(externalBefore);
+    } finally {
+      editor.cleanUp();
+      first.cleanUp();
+      second.cleanUp();
+      dom.cleanup();
+    }
+  });
+
+  test('restoring an identical cached FileDiff does not emit a change', async () => {
+    const dom = installDom();
+    const changes: string[] = [];
+    const editor = new Editor<undefined>({
+      persistState: true,
+      onChange: (file) => changes.push(file.contents),
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const externalDiff = parseDiffFromFile(
+      {
+        name: 'identical.ts',
+        contents: 'before\n',
+        cacheKey: 'identical:old',
+      },
+      {
+        name: 'identical.ts',
+        contents: 'after\n',
+        cacheKey: 'identical:new',
+      }
+    );
+    const first = new FileDiff<undefined>({
+      disableErrorHandling: true,
+      disableFileHeader: true,
+      theme: DEFAULT_THEMES,
+    });
+    const second = new FileDiff<undefined>({
+      disableErrorHandling: true,
+      disableFileHeader: true,
+      theme: DEFAULT_THEMES,
+    });
+
+    try {
+      first.render({
+        fileDiff: externalDiff,
+        fileContainer: container,
+        forceRender: true,
+      });
+      editor.edit(first);
+      await waitFor(() => editor.getText() === 'after\n');
       editor.cleanUp();
       first.cleanUp();
       container.innerHTML = '';
 
       second.render({
-        oldFile,
-        newFile,
+        fileDiff: externalDiff,
         fileContainer: container,
         forceRender: true,
       });
       editor.edit(second);
-      // waitFor times out silently; the expect below is the real assertion.
-      await waitFor(() => editor.getText() === 'alpha\nbravo\n');
-      expect(editor.getText()).toBe('alpha\nbravo\n');
+      await waitFor(
+        () =>
+          editor.getText() === 'after\n' &&
+          container.shadowRoot
+            ?.querySelector('[data-content]')
+            ?.getAttribute('contenteditable') === 'true'
+      );
+
+      expect(changes).toEqual([]);
+    } finally {
+      editor.cleanUp();
+      first.cleanUp();
+      second.cleanUp();
+      dom.cleanup();
+    }
+  });
+
+  test('a restored FileDiff accepts a later external update through normal history', async () => {
+    const dom = installDom();
+    const changes: string[] = [];
+    const editor = new Editor<undefined>({
+      persistState: true,
+      onChange: (file) => changes.push(file.contents),
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const oldFile: FileContents = {
+      name: 'restored-update.ts',
+      contents: 'base\n',
+    };
+    const initialDiff = parseDiffFromFile(oldFile, {
+      name: oldFile.name,
+      contents: 'alpha\n',
+    });
+    initialDiff.cacheKey = 'restored-update:v1';
+    const replacementDiff = parseDiffFromFile(oldFile, {
+      name: oldFile.name,
+      contents: 'charlie\n',
+    });
+    replacementDiff.cacheKey = 'restored-update:v2';
+    const initialBefore = structuredClone(initialDiff);
+    const replacementBefore = structuredClone(replacementDiff);
+    const first = new FileDiff<undefined>({
+      disableErrorHandling: true,
+      disableFileHeader: true,
+      theme: DEFAULT_THEMES,
+    });
+    const second = new FileDiff<undefined>({
+      disableErrorHandling: true,
+      disableFileHeader: true,
+      theme: DEFAULT_THEMES,
+    });
+
+    try {
+      first.render({
+        fileDiff: initialDiff,
+        fileContainer: container,
+        forceRender: true,
+      });
+      editor.edit(first);
+      await waitFor(() => editor.getText() === 'alpha\n');
+      editor.applyEdits([
+        {
+          range: {
+            start: { line: 0, character: 0 },
+            end: { line: 0, character: 0 },
+          },
+          newText: 'local ',
+        },
+      ]);
+      expect(editor.getText()).toBe('local alpha\n');
+
+      editor.cleanUp();
+      first.cleanUp();
+      container.innerHTML = '';
+      changes.length = 0;
+
+      second.render({
+        fileDiff: initialDiff,
+        fileContainer: container,
+        forceRender: true,
+      });
+      editor.edit(second);
+      await waitFor(
+        () => editor.getText() === 'local alpha\n' && changes.length === 1
+      );
+
+      second.render({
+        fileDiff: replacementDiff,
+        fileContainer: container,
+        forceRender: true,
+      });
+      await waitFor(
+        () => editor.getText() === 'charlie\n' && changes.length === 2
+      );
+
+      expect(changes).toEqual(['local alpha\n', 'charlie\n']);
+      editor.undo();
+      expect(editor.getText()).toBe('local alpha\n');
+      editor.undo();
+      expect(editor.getText()).toBe('alpha\n');
+      editor.redo();
+      expect(editor.getText()).toBe('local alpha\n');
+      editor.redo();
+      expect(editor.getText()).toBe('charlie\n');
+      expect(changes).toEqual([
+        'local alpha\n',
+        'charlie\n',
+        'local alpha\n',
+        'alpha\n',
+        'local alpha\n',
+        'charlie\n',
+      ]);
+      expect(initialDiff).toEqual(initialBefore);
+      expect(replacementDiff).toEqual(replacementBefore);
     } finally {
       editor.cleanUp();
       first.cleanUp();

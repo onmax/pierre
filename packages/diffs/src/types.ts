@@ -835,9 +835,6 @@ export interface RenderedDiffASTCache {
   result: ThemedDiffResult | undefined;
   renderRange: RenderRange | undefined;
   isDirty?: boolean;
-  // A render was skipped while a highlight was in progress; its completion
-  // will trigger a re-render.
-  highlightPending?: boolean;
 }
 
 /**
@@ -1026,8 +1023,6 @@ export interface DiffsBaseComponent {
 export interface DiffsEditableComponent<
   LAnnotation,
 > extends DiffsBaseComponent {
-  /** @internal Return the current file when this component renders one. */
-  __getCurrentFile?: () => FileContents | undefined;
   /**
    * @internal Code options with worker-pool overrides applied: the theme the
    * shared highlighter is actually loaded with and the pool's tokenize limit.
@@ -1121,22 +1116,53 @@ export type EditableInstance<T extends { type: string }> = T extends {
   ? never
   : T;
 
+interface SyncRenderViewBaseProps {
+  highlighter: DiffsHighlighter;
+  fileContainer: HTMLElement;
+  externalCacheKey: string | undefined;
+  renderRange: RenderRange | undefined;
+  /** Start fresh history instead of retaining or extending the current history. */
+  resetHistory?: boolean;
+}
+
+export interface SyncFileRenderViewProps<
+  LAnnotation,
+> extends SyncRenderViewBaseProps {
+  file: FileContents;
+  lineAnnotations: LineAnnotation<LAnnotation>[] | undefined;
+  /** Treat the supplied contents as an externally provided document update. */
+  externalDocument?: boolean;
+  /** The external contents replaced by a restored persisted document. */
+  restoredDocument?: string;
+}
+
+export interface SyncDiffRenderViewProps<
+  LAnnotation,
+> extends SyncRenderViewBaseProps {
+  fileDiff: FileDiffMetadata;
+  lineAnnotations: DiffLineAnnotation<LAnnotation>[] | undefined;
+  /** Treat the supplied contents as an externally provided document update. */
+  externalDocument?: boolean;
+  /**
+   * The private diff was initialized from a persisted document. The previous
+   * external contents are used only to report that restored document change.
+   */
+  restoredDocument?: string;
+}
+
+export type SyncRenderViewProps<LAnnotation> =
+  | SyncFileRenderViewProps<LAnnotation>
+  | SyncDiffRenderViewProps<LAnnotation>;
+
 export interface DiffsEditor<LAnnotation> {
-  /** @internal */
-  __prepareFile?(file: FileContents): FileContents;
+  /** @internal Return cached text for the same persisted document identity. */
+  __getCachedDocumentContents?(
+    file: Pick<FileContents, 'cacheKey' | 'lang' | 'name'>
+  ): string | undefined;
   __postponeBgTokenizeToNextFrame(): void;
   /** @internal Capture focus intent before replacing the editable view. */
   __captureFocusForDOMReplacement(): void;
-  __syncRenderView(
-    highlighter: DiffsHighlighter,
-    fileContainer: HTMLElement,
-    fileOrDiff: FileContents | FileDiffMetadata,
-    lineAnnotations:
-      | LineAnnotation<LAnnotation>[]
-      | DiffLineAnnotation<LAnnotation>[]
-      | undefined,
-    renderRange: RenderRange | undefined
-  ): void;
+  __syncRenderView(props: SyncRenderViewProps<LAnnotation>): void;
   edit<T extends DiffsEditableComponent<LAnnotation>>(
     fileInstance: EditableInstance<T>
   ): () => void;

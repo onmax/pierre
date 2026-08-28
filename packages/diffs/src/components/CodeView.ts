@@ -535,8 +535,10 @@ export interface CodeViewOptions<LAnnotation>
     options: CodeViewCreateEditorOptions<LAnnotation>
   ): DiffsEditor<LAnnotation> | undefined;
   /**
-   * Called when an edited item's document changes, with the owning item
-   * resolved by CodeView.
+   * Called whenever the edited document changes, from internal (edit) changes
+   * or external (CodeViewItem) changes.
+   *
+   * Do not feed these changes back into item state until the editing is done.
    */
   onItemEditChange?(
     item: CodeViewItem<LAnnotation>,
@@ -2015,13 +2017,13 @@ export class CodeView<LAnnotation = undefined> {
   }
 
   /**
-   * Attach (or lazily create) the editor for a mounted edit-mode item. Called
+   * Lazily create and attach the editor for a mounted edit-mode item. Called
    * from the render loop so every mounted item passes through it: fresh
    * mounts, remounts after virtualization released the item, and items whose
    * edit flag was just turned on. Editors persist across unmounts, so a
    * remounted item re-attaches its existing editor and resumes the retained
-   * document; the renderers keep the host's file/diff data in sync with the
-   * session so the remount paints the edited text.
+   * document; the instance retains its private session model so the remount
+   * paints the edited text without changing the host input.
    */
   private attachItemEditor(item: CodeViewContextItem<LAnnotation>): void {
     const { id } = item.item;
@@ -3447,6 +3449,7 @@ export class CodeView<LAnnotation = undefined> {
     this.syncContainerHeight();
     const stickyBounds = this.getStickyBounds(windowSpecs);
     if (stickyBounds == null) {
+      this.stickyOffset.style.height = `${this.getPagedLayoutTop(windowSpecs.top)}px`;
       return;
     }
     this.applyStickyPositioning(stickyBounds);
@@ -4015,24 +4018,14 @@ export class CodeView<LAnnotation = undefined> {
       }
       item.top = runningTop;
       if (item.type === 'diff') {
-        const fileDiff = item.instance.consumeCodeViewLayoutChanges(
-          item.item.fileDiff
-        );
-        if (fileDiff != null) {
-          // Hydration is staged on a clone so layout only changes during this
-          // render pass, then copied back to preserve the caller's diff
-          // identity which matches the rest of the architecture of how we
-          // handle partial hydration
-          Object.assign(item.item.fileDiff, fileDiff);
-        }
-        item.height = item.instance.prepareCodeViewItem(
+        item.height = item.instance.updateCodeViewLayout(
           item.item.fileDiff,
           runningTop,
           reset,
           item.item.annotations ?? []
         );
       } else {
-        item.height = item.instance.prepareCodeViewItem(
+        item.height = item.instance.updateCodeViewLayout(
           item.item.file,
           runningTop,
           reset,
@@ -4075,14 +4068,14 @@ function prepareItemInstance<LAnnotation>(
 ): number {
   item.instance.cleanUp(true);
   if (item.type === 'diff') {
-    return item.instance.prepareCodeViewItem(
+    return item.instance.updateCodeViewLayout(
       item.item.fileDiff,
       item.top,
       undefined,
       item.item.annotations ?? []
     );
   } else {
-    return item.instance.prepareCodeViewItem(
+    return item.instance.updateCodeViewLayout(
       item.item.file,
       item.top,
       undefined,
