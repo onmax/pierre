@@ -1000,14 +1000,6 @@ export class FileDiff<
       );
     }
 
-    // use the file name as the cache key if it is not set
-    if (fileDiff != null && fileDiff.cacheKey === undefined) {
-      fileDiff.cacheKey =
-        fileDiff.prevName != null
-          ? fileDiff.prevName + ':' + fileDiff.name
-          : fileDiff.name;
-    }
-
     // postpone background tokenizing to next frame for avoiding UI freeze
     // during render
     this.editor?.__postponeBgTokenizeToNextFrame();
@@ -1024,6 +1016,23 @@ export class FileDiff<
       hasFileInput &&
       (!areOptionalFilesEqual(oldFile, this.deletionFile) ||
         !areOptionalFilesEqual(newFile, this.additionFile));
+    const { fileDiffCache: sessionDiff } = this;
+    if (
+      fileDiff != null &&
+      this.editor != null &&
+      sessionDiff?.editSessionDirty === true &&
+      fileDiff.cacheKey === sessionDiff.cacheKey &&
+      fileDiff.name === sessionDiff.name &&
+      fileDiff.lang === sessionDiff.lang &&
+      (fileDiff.cacheKey !== undefined ||
+        fileDiff.prevName === sessionDiff.prevName)
+    ) {
+      // Preserve dirty metadata only for the same editor target. Unkeyed diffs
+      // also compare the previous path because no cache key distinguishes it.
+      // This is a temporary workaround for edit vs render content change
+      // hardening
+      fileDiff = sessionDiff;
+    }
     let diffDidChange = fileDiff != null && fileDiff !== this.fileDiff;
     const annotationsChanged =
       lineAnnotations != null &&
