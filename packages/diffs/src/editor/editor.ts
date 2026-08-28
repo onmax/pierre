@@ -2554,7 +2554,10 @@ export class Editor<LAnnotation> implements DiffsEditor<LAnnotation> {
   #computeContentOffset(contentEl: HTMLElement) {
     if (this.#isDiff && this.#diffSyle === 'split' && this.#isWrap) {
       this.#contentOffset = {
-        top: contentEl.offsetTop,
+        // #getLineY already includes the code column's block padding. Store
+        // only the grid displacement beyond it so split + wrap does not add
+        // the same top gap twice.
+        top: contentEl.offsetTop - this.#metrics.paddingTop,
         left: contentEl.offsetLeft - this.#getGutterWidth(),
       };
       if (this.#options.__debug === true) {
@@ -5966,7 +5969,13 @@ export class Editor<LAnnotation> implements DiffsEditor<LAnnotation> {
       const measureGrapheme = (index: number): DOMRect => {
         range.setStart(textNode, graphemeStart(index));
         range.setEnd(textNode, graphemeStart(index + 1));
-        return range.getBoundingClientRect();
+        // WebKit adds a zero-width fragment on the previous row at soft wraps;
+        // the final fragment belongs to the grapheme's rendered row.
+        const clientRects = range.getClientRects();
+        return (
+          clientRects.item(clientRects.length - 1) ??
+          range.getBoundingClientRect()
+        );
       };
 
       // A new visual line starts whenever a grapheme's top edge moves below
