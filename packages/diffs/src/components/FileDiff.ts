@@ -43,13 +43,16 @@ import type {
   DiffsEditableComponent,
   DiffsEditor,
   DiffsTextDocument,
+  EditCompletionDecision,
   EditorActiveLineOptions,
+  EditorChangeEvent,
   ExpansionDirections,
   FileContents,
   FileDiffMetadata,
   HighlightedToken,
   HunkData,
   HunkSeparators,
+  LineAnnotation,
   MaybeDiffFileInput,
   PostRenderPhase,
   PrePropertiesConfig,
@@ -69,6 +72,7 @@ import { arePrePropertiesEqual } from '../utils/arePrePropertiesEqual';
 import { areRenderRangesEqual } from '../utils/areRenderRangesEqual';
 import { areThemesEqual } from '../utils/areThemesEqual';
 import { awaitWithTimeout } from '../utils/awaitWithTimeout';
+import { cloneFileDiffMetadata } from '../utils/cloneFileDiffMetadata';
 import { createAnnotationWrapperNode } from '../utils/createAnnotationWrapperNode';
 import { createGutterUtilityContentNode } from '../utils/createGutterUtilityContentNode';
 import { createUnsafeCSSStyleNode } from '../utils/createUnsafeCSSStyleNode';
@@ -77,6 +81,12 @@ import {
   wrapThemeCSS,
   wrapUnsafeCSS,
 } from '../utils/cssWrappers';
+import {
+  adoptEditSessionAnnotations,
+  type EditSessionAnnotations,
+  resolveEditSessionSlotName,
+  writeEditSessionAnnotations,
+} from '../utils/editSessionAnnotations';
 import {
   captureExpansionAnchors,
   finishEditSessionForDiff,
@@ -213,6 +223,46 @@ export type FileDiffHydrationProps<LAnnotation> = Omit<
 
 export type FileDiffType = 'file-diff' | 'unresolved-file';
 
+/**
+ * `onEditComplete` event argument when an edit session ends with a changed
+ * diff.
+ *
+ * `fileDiff` is a freshly computed diff of the edited contents with no
+ * `cacheKey` set; accepting installs it.
+ *
+ * `originalFileDiff` is the last `fileDiff` the component was given externally;
+ * a revert restores it.
+ *
+ * `oldFile`/`newFile` are the completed contents as a file pair, for updating
+ * file-pair or patch inputs. `null` marks the absent side of an added file (a
+ * deleted file cannot be edited).
+ *
+ * `lineAnnotations` is the completed annotation collection, potentially
+ * modified based on the edit changes to keep annotations aligned to their
+ * intended targets
+ *
+ * `originalLineAnnotations` is the last collection provided to the component
+ * externally, which a revert keeps.
+ */
+export interface FileDiffEditCompleteEvent<LAnnotation> {
+  fileDiff: FileDiffMetadata;
+  originalFileDiff: FileDiffMetadata;
+  oldFile: FileContents | null;
+  newFile: FileContents | null;
+  lineAnnotations: DiffLineAnnotation<LAnnotation>[] | undefined;
+  originalLineAnnotations: DiffLineAnnotation<LAnnotation>[];
+}
+
+/**
+ * Decides a completed edit synchronously: return `'accept'` to install the
+ * event's `fileDiff`, or `'reject'` to restore `originalFileDiff`. The event is
+ * frozen, so re-key the accepted diff in place (`event.fileDiff.cacheKey =
+ * '…'`) before accepting. A missing handler rejects.
+ */
+export type FileDiffEditCompleteHandler<LAnnotation> = (
+  event: FileDiffEditCompleteEvent<LAnnotation>
+) => EditCompletionDecision;
+
 export interface FileDiffOptions<LAnnotation>
   extends
     Omit<BaseDiffOptions, 'hunkSeparators'>,
@@ -249,6 +299,22 @@ export interface FileDiffOptions<LAnnotation>
     instance: FileDiff<LAnnotation>,
     phase: PostRenderPhase
   ): unknown;
+
+  /**
+   * Fired for every document change of an active edit session on this
+   * component, with the same `EditorChangeEvent` the editor reports through
+   * its own `onChange`. Do not feed the event's file back into the component
+   * while the session is active.
+   */
+  onEditChange?(event: EditorChangeEvent<LAnnotation, 'diff'>): void;
+
+  /**
+   * Fired when `edit` toggles false or a component unmounts. Only called if
+   * there are content changes resolving in a new diff. If no callback is
+   * provided, then the component will always revert back to the last
+   * `fileDiff` or `oldFile`/`newFiles` passed into the component
+   */
+  onEditComplete?: FileDiffEditCompleteHandler<LAnnotation>;
 }
 
 interface AnnotationElementCache<LAnnotation> {
@@ -350,6 +416,9 @@ export class FileDiff<
   protected additionFile?: FileContents | null;
   public fileDiff: FileDiffMetadata | undefined;
   private editSessionDiff: FileDiffMetadata | undefined;
+  private editSessionAnnotations:
+    | EditSessionAnnotations<DiffLineAnnotation<LAnnotation>>
+    | undefined;
   private pendingEditSessionReplacement:
     | PendingEditSessionReplacement
     | undefined;
@@ -416,8 +485,9 @@ export class FileDiff<
   protected createHunksRenderer(
     options: FileDiffOptions<LAnnotation>
   ): DiffHunksRenderer<LAnnotation> {
-    return new DiffHunksRenderer(
+    return new DiffHunksRenderer<LAnnotation>(
       this.getHunksRendererOptions(options),
+      this.getAnnotationSlotName,
       this.handleHighlightRender,
       this.workerManager
     );
@@ -598,10 +668,91 @@ export class FileDiff<
     return this.interactionManager.getHoveredLine();
   };
 
+  public getAnnotationSlotName = (
+    annotation: LineAnnotation<LAnnotation> | DiffLineAnnotation<LAnnotation>
+  ): string => {
+    return resolveEditSessionSlotName(
+      this.editSessionAnnotations,
+      annotation,
+      getLineAnnotationName
+    );
+  };
+
+  // Return the annotations this component currently renders. Once editing
+  // starts, the private session state owns them.
+  protected getLatestAnnotations(): DiffLineAnnotation<LAnnotation>[] {
+    return this.editSessionAnnotations?.current ?? this.lineAnnotations;
+  }
+
+  // Returns true when the caller passed annotations this component has not
+  // handled yet. Re-renders often re-pass an annotations array the component
+  // already holds — the external one, or one the active session tracks — and
+  // treating those repeats as new writes would move annotations, so they are
+  // recognized by identity and ignored.
+  protected isNewAnnotations(
+    lineAnnotations: DiffLineAnnotation<LAnnotation>[]
+  ): boolean {
+    const {
+      editSessionAnnotations: session,
+      lineAnnotations: externalAnnotations,
+    } = this;
+    if (lineAnnotations === externalAnnotations) {
+      return false;
+    }
+    return (
+      session == null ||
+      (lineAnnotations !== session.provided &&
+        lineAnnotations !== session.current)
+    );
+  }
+
   public setLineAnnotations(
     lineAnnotations: DiffLineAnnotation<LAnnotation>[]
   ): void {
+    const { editSessionAnnotations: sessionAnnotations } = this;
+    if (sessionAnnotations == null) {
+      this.lineAnnotations = lineAnnotations;
+      return;
+    }
+    if (!this.isNewAnnotations(lineAnnotations)) {
+      return;
+    }
+    // Externally provided annotations are the source of truth: they become the
+    // new external collection and the session renders them at the line numbers
+    // given. The caller owns whether those positions still make sense after an
+    // edit; a revert renders this collection unchanged rather than moving them.
     this.lineAnnotations = lineAnnotations;
+    writeEditSessionAnnotations(
+      sessionAnnotations,
+      lineAnnotations,
+      getLineAnnotationName
+    );
+  }
+
+  // Takes annotations the editor remapped and makes them what the session
+  // renders: updates the session, feeds the renderer, and re-renders
+  // annotation rows. Returns true when new annotations were adopted —
+  // virtualized subclasses override this and refresh their layout on true.
+  //
+  // The editor delivers annotations through two calls. An edit that changes
+  // the line count sends them with the structural rebuild
+  // (applyDocumentChange) and again with the change event (emitEditChange);
+  // the identity check makes the second call a no-op. An edit that keeps the
+  // line count skips the rebuild, so the event is its only path here.
+  //
+  // The annotations the caller passed in are never touched — stale
+  // re-renders keep deduping against them.
+  protected syncEditSessionAnnotationsFromEditor(
+    lineAnnotations: DiffLineAnnotation<LAnnotation>[]
+  ): boolean {
+    const { editSessionAnnotations: session } = this;
+    if (session == null || lineAnnotations === session.current) {
+      return false;
+    }
+    session.current = lineAnnotations;
+    this.hunksRenderer.setLineAnnotations(lineAnnotations);
+    this.renderAnnotations();
+    return true;
   }
 
   private canPartiallyRender(
@@ -696,7 +847,7 @@ export class FileDiff<
     }
     return (
       overflow === 'scroll' &&
-      (this.lineAnnotations.length > 0 ||
+      (this.getLatestAnnotations().length > 0 ||
         this.pre?.hasAttribute('data-has-merge-conflict') === true)
     );
   }
@@ -728,9 +879,14 @@ export class FileDiff<
   public cleanUp(recycle: boolean = false): void {
     dequeueRender(this.handleEditSessionRender);
     this.emitPostRender(true);
-    // Persist editor state while the code scrollers still exist.
-    this.editor?.cleanUp(recycle);
+    // Tear the editor down while the code scrollers still exist. A recycle
+    // persists its editor state; a full teardown ends the session, so the
+    // editor drops its stored document instead.
+    this.editor?.cleanUp(recycle ? 'recycle' : 'complete');
     this.editor = undefined;
+    if (!recycle) {
+      this.settleEditSession(false);
+    }
     this.resizeManager.cleanUp();
     this.interactionManager.cleanUp();
     this.scrollSyncManager.cleanUp();
@@ -790,6 +946,7 @@ export class FileDiff<
       // Clean up the data
       this.fileDiff = undefined;
       this.editSessionDiff = undefined;
+      this.editSessionAnnotations = undefined;
       this.pendingEditSessionReplacement = undefined;
       this.pendingPersistedDocumentRestore = undefined;
       this.renderedDiff = undefined;
@@ -1099,11 +1256,15 @@ export class FileDiff<
     return true;
   }
 
-  // Store a new caller-owned baseline and, when editing, retain the previous
-  // session only until a partial replacement is hydrated. Full replacements
-  // can install their new private session immediately.
+  // Install a replacement diff from the caller; returns false when it is the
+  // diff already installed. During an edit session, the outgoing session diff
+  // and cache key are kept aside until the editor syncs — it uses them to
+  // decide whether the swap keeps or resets undo history. A hydrated
+  // replacement starts its new session immediately; a partial one starts
+  // loading its files and gets a session once hydrated.
   protected updateExternalDiff(
-    incomingExternalDiff: FileDiffMetadata
+    incomingExternalDiff: FileDiffMetadata,
+    lineAnnotations?: DiffLineAnnotation<LAnnotation>[]
   ): boolean {
     if (areDiffTargetsEqual(this.fileDiff, incomingExternalDiff)) {
       return false;
@@ -1133,6 +1294,18 @@ export class FileDiff<
       }
     } else if (this.editor != null && !incomingExternalDiff.isPartial) {
       this.createInitialEditSession(this.editor, incomingExternalDiff);
+    }
+    if (this.editSessionAnnotations != null && lineAnnotations != null) {
+      // These annotations arrived with the new diff, so their line numbers
+      // describe it. The positions the session tracked for the old document
+      // mean nothing now: the session restarts from these annotations, and
+      // they also become what renders once the session ends.
+      this.lineAnnotations = lineAnnotations;
+      this.editSessionAnnotations = adoptEditSessionAnnotations(
+        lineAnnotations,
+        getLineAnnotationName,
+        this.editSessionAnnotations
+      );
     }
     return true;
   }
@@ -1237,8 +1410,8 @@ export class FileDiff<
       fileDiff != null && !areDiffTargetsEqual(fileDiff, this.fileDiff);
     const annotationsChanged =
       lineAnnotations != null &&
-      (lineAnnotations.length > 0 || this.lineAnnotations.length > 0)
-        ? lineAnnotations !== this.lineAnnotations
+      (lineAnnotations.length > 0 || this.getLatestAnnotations().length > 0)
+        ? this.isNewAnnotations(lineAnnotations)
         : false;
 
     if (
@@ -1285,10 +1458,10 @@ export class FileDiff<
     }
 
     if (fileDiff != null && diffDidChange) {
-      this.updateExternalDiff(fileDiff);
+      this.updateExternalDiff(fileDiff, lineAnnotations);
     } else if (nextParsedFileDiff != null) {
       diffDidChange = true;
-      this.updateExternalDiff(nextParsedFileDiff);
+      this.updateExternalDiff(nextParsedFileDiff, lineAnnotations);
     }
     if (diffDidChange) {
       this.clearReusableHeader();
@@ -1318,7 +1491,7 @@ export class FileDiff<
     this.hunksRenderer.setOptions(this.getHunksRendererOptions(this.options));
     this.syncInteractionOptions();
 
-    this.hunksRenderer.setLineAnnotations(this.lineAnnotations);
+    this.hunksRenderer.setLineAnnotations(this.getLatestAnnotations());
 
     const { disableErrorHandling = false, disableFileHeader = false } =
       this.options;
@@ -1511,7 +1684,8 @@ export class FileDiff<
   }
 
   private syncRenderViewToEditor(): void {
-    const { editor, fileContainer, lineAnnotations } = this;
+    const { editor, fileContainer } = this;
+    const lineAnnotations = this.getLatestAnnotations();
     const renderRange = this.computeEditorRenderRange(this.renderRange);
     const fileDiff = this.getLatestDiff();
     if (
@@ -1531,8 +1705,11 @@ export class FileDiff<
       ) {
         return;
       }
-      const { pendingEditSessionReplacement: replacement } = this;
-      const externalDiff = this.fileDiff;
+      const {
+        pendingEditSessionReplacement: replacement,
+        fileDiff: externalDiff,
+        pendingPersistedDocumentRestore: pendingRestore,
+      } = this;
       const externalDocument =
         replacement != null &&
         externalDiff != null &&
@@ -1543,8 +1720,7 @@ export class FileDiff<
       const externalCacheKey =
         replacement != null && !externalDocument
           ? replacement.prevExternalCacheKey
-          : this.fileDiff?.cacheKey;
-      const pendingRestore = this.pendingPersistedDocumentRestore;
+          : externalDiff?.cacheKey;
       const restoredDocument =
         pendingRestore?.editSessionDiff === fileDiff
           ? pendingRestore.previousContents
@@ -1619,6 +1795,15 @@ export class FileDiff<
     };
   }
 
+  public emitEditChange(event: EditorChangeEvent<LAnnotation, 'diff'>): void {
+    const { lineAnnotations } = event;
+    if (lineAnnotations != null) {
+      this.syncEditSessionAnnotationsFromEditor(lineAnnotations);
+    }
+    const { onEditChange } = this.options;
+    onEditChange?.(event);
+  }
+
   public attachEditor(
     editor: DiffsEditor<LAnnotation>
   ): (recycle?: boolean) => void {
@@ -1632,6 +1817,10 @@ export class FileDiff<
     }
     this.editor?.cleanUp();
     this.editor = editor;
+    this.editSessionAnnotations ??= adoptEditSessionAnnotations(
+      this.lineAnnotations,
+      getLineAnnotationName
+    );
     const {
       fileDiff: externalDiff,
       pendingEditSessionReplacement: pendingReplacement,
@@ -1681,22 +1870,157 @@ export class FileDiff<
     return (recycle: boolean = false) => {
       this.editor = undefined;
       // A recycle detach is a virtualized unmount mid-session: the session
-      // continues on remount, so hunks stay session-shaped. Only a genuine
-      // end runs the exit recompute.
+      // continues on remount, so hunks stay session-shaped. Only a
+      // non-recycle detach runs the exit recompute.
       if (!recycle) {
         this.finishEditSession();
       }
     };
   }
 
-  // Genuine session exit for the live detach path.
+  // Session exit for the live detach path.
   private finishEditSession(): void {
     this.hunksRenderer.endEditSession();
-    this.completeEditSession();
+    this.finalizeEditSessionHunks();
   }
 
   /**
-   * Run the genuine session-end recompute: restore recompute-shaped hunks (a
+   * Ends the edit session and settles which diff this component renders.
+   * Requires the editor to be detached first. Does nothing when no session
+   * exists, so callers can invoke it again safely after it has settled.
+   *
+   * When the edited new-side text matches the external diff (including edits
+   * undone all the way back), the session is discarded without calling
+   * `onEditComplete`: the external diff stays, and annotations keep the
+   * session's collection so annotation writes made during the session
+   * survive.
+   *
+   * When the text changed, `onEditComplete` receives a fresh keyless
+   * `FileDiffMetadata` with fully recomputed hunks, alongside the current
+   * external diff, complete `oldFile`/`newFile` representations derived from
+   * the completed diff, and the session's annotations. Returning the event's
+   * `fileDiff` installs it as the new external value together with those
+   * annotations. Returning `null`, returning the exact `originalFileDiff`,
+   * or having no handler restores the external diff and its annotations. Any
+   * other return throws, as does an accepted diff reusing the replaced
+   * diff's `cacheKey` — in both cases the component still leaves the session
+   * on the external diff before the error propagates.
+   */
+  public completeEditSession(): void {
+    this.settleEditSession(true);
+  }
+
+  private settleEditSession(installResult: boolean): void {
+    const {
+      editSessionDiff,
+      editSessionAnnotations,
+      fileDiff: externalDiff,
+      lineAnnotations: externalAnnotations,
+    } = this;
+    if (editSessionDiff == null || externalDiff == null) {
+      return;
+    }
+    if (this.editor != null) {
+      throw new Error(
+        'FileDiff.completeEditSession: detach the editor before completing the session'
+      );
+    }
+    this.hunksRenderer.endEditSession();
+    this.finalizeEditSessionHunks();
+
+    const sessionAnnotationsCurrent = editSessionAnnotations?.current;
+    const contentsChanged =
+      editSessionDiff.additionLines.join('') !==
+      externalDiff.additionLines.join('');
+    let acceptedDiff: FileDiffMetadata | undefined;
+    let acceptedOldFile: FileContents | null = null;
+    let acceptedNewFile: FileContents | null = null;
+    let failed = false;
+    let failure: unknown;
+    if (contentsChanged) {
+      const completedDiff = cloneFileDiffMetadata(editSessionDiff);
+      const newFile: FileContents = {
+        name: completedDiff.name,
+        contents: completedDiff.additionLines.join(''),
+      };
+      if (completedDiff.lang != null) {
+        newFile.lang = completedDiff.lang;
+      }
+      const event: FileDiffEditCompleteEvent<LAnnotation> = {
+        fileDiff: completedDiff,
+        originalFileDiff: externalDiff,
+        oldFile:
+          completedDiff.type === 'new'
+            ? null
+            : {
+                name: completedDiff.prevName ?? completedDiff.name,
+                contents: completedDiff.deletionLines.join(''),
+              },
+        newFile,
+        lineAnnotations: sessionAnnotationsCurrent,
+        originalLineAnnotations: externalAnnotations,
+      };
+      const { onEditComplete } = this.options;
+      // Frozen so a handler cannot swap the event's fileDiff/originalFileDiff
+      // references; nested mutation (i.e. a fresh cacheKey on event.fileDiff)
+      // still works.
+      Object.freeze(event);
+      try {
+        const decision =
+          onEditComplete != null ? onEditComplete(event) : 'reject';
+        if (decision === 'accept') {
+          if (
+            completedDiff.cacheKey != null &&
+            completedDiff.cacheKey === externalDiff.cacheKey
+          ) {
+            throw new Error(
+              'FileDiff.completeEditSession: an accepted diff must not reuse the replaced diff cacheKey'
+            );
+          }
+          acceptedDiff = completedDiff;
+          acceptedOldFile = event.oldFile;
+          acceptedNewFile = event.newFile;
+        }
+      } catch (error) {
+        failed = true;
+        failure = error;
+      }
+    }
+
+    if (installResult && acceptedDiff != null) {
+      this.fileDiff = acceptedDiff;
+      // Callers using the oldFile/newFile API get the stored pair
+      // refreshed so their next render with the event's files does not
+      // reparse over the accepted diff. Every editable pair has a new
+      // side (deleted files cannot be edited), so that is the check.
+      if (this.additionFile != null) {
+        this.deletionFile = acceptedOldFile;
+        this.additionFile = acceptedNewFile;
+      }
+      if (sessionAnnotationsCurrent != null) {
+        this.lineAnnotations = sessionAnnotationsCurrent;
+      }
+    } else if (
+      installResult &&
+      !contentsChanged &&
+      sessionAnnotationsCurrent != null
+    ) {
+      this.lineAnnotations = sessionAnnotationsCurrent;
+    }
+    this.editSessionDiff = undefined;
+    this.editSessionAnnotations = undefined;
+    this.pendingEditSessionReplacement = undefined;
+    this.pendingPersistedDocumentRestore = undefined;
+    if (installResult && this.fileContainer != null) {
+      this.rerender();
+    }
+    if (failed) {
+      throw failure;
+    }
+  }
+
+  /**
+   * Run the session-end recompute: restore recompute-shaped hunks (a
    * context-only region collapses away, boundaries re-derive), preserve
    * expansion state best-effort via old-side anchors, and repaint through
    * the session render path — which also invalidates virtualized layout,
@@ -1707,7 +2031,7 @@ export class FileDiff<
    * the deferred rerender is enabled-guarded. Returns true when a recompute
    * ran.
    */
-  public completeEditSession(): boolean {
+  public finalizeEditSessionHunks(): boolean {
     const fileDiff = this.getLatestDiff();
     if (fileDiff == null || fileDiff.editSessionDirty !== true) {
       return false;
@@ -1742,13 +2066,8 @@ export class FileDiff<
     this.detachAdditionLines();
     this.hunksRenderer.beginEditSession(editSessionDiff);
     this.hunksRenderer.applyDocumentChange(textDocument);
-    if (
-      newLineAnnotations !== undefined &&
-      newLineAnnotations !== this.lineAnnotations
-    ) {
-      this.setLineAnnotations(newLineAnnotations);
-      this.hunksRenderer.setLineAnnotations(this.lineAnnotations);
-      this.renderAnnotations();
+    if (newLineAnnotations != null) {
+      this.syncEditSessionAnnotationsFromEditor(newLineAnnotations);
     }
     this.rerender();
     this.interactionManager.setSelectionDirty();
@@ -2156,9 +2475,11 @@ export class FileDiff<
     }
     const staleAnnotations = new Map(this.annotationCache);
     const { renderAnnotation } = this.options;
-    if (renderAnnotation != null && this.lineAnnotations.length > 0) {
-      for (const [index, annotation] of this.lineAnnotations.entries()) {
-        const id = `${index}-${getLineAnnotationName(annotation)}`;
+    const lineAnnotations = this.getLatestAnnotations();
+    if (renderAnnotation != null && lineAnnotations.length > 0) {
+      for (const [index, annotation] of lineAnnotations.entries()) {
+        const name = this.getAnnotationSlotName(annotation);
+        const id = `${index}-${name}`;
         let cache = this.annotationCache.get(id);
         if (
           cache == null ||
@@ -2172,9 +2493,7 @@ export class FileDiff<
             continue;
           }
           cache = {
-            element: createAnnotationWrapperNode(
-              getLineAnnotationName(annotation)
-            ),
+            element: createAnnotationWrapperNode(name),
             annotation,
           };
           cache.element.appendChild(content);
@@ -2343,7 +2662,7 @@ export class FileDiff<
     this.placeHolder?.remove();
     this.placeHolder = undefined;
     // Session metadata changes in place, so an HTML cache created from the
-    // external baseline cannot describe the current edit-session header.
+    // external diff cannot describe the current edit-session header.
     const {
       headerCache: {
         fileDiff: cachedHeaderDiff,

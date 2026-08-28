@@ -35,9 +35,11 @@ export function PatchDiff<LAnnotation = undefined>({
   renderGutterUtility,
   disableWorkerPool = false,
   edit = false,
+  onEditChange,
+  onEditComplete,
 }: PatchDiffProps<LAnnotation>): React.JSX.Element {
   const fileDiff = usePatch(patch);
-  const { ref, getHoveredLine } = useFileDiffInstance({
+  const { ref, getHoveredLine, getAnnotationSlotName } = useFileDiffInstance({
     fileDiff,
     options,
     editorOptions,
@@ -49,6 +51,8 @@ export function PatchDiff<LAnnotation = undefined>({
     hasCustomHeader: renderCustomHeader != null,
     disableWorkerPool,
     edit,
+    onEditChange,
+    onEditComplete,
   });
   const children = renderDiffChildren({
     fileDiff,
@@ -60,6 +64,7 @@ export function PatchDiff<LAnnotation = undefined>({
     lineAnnotations,
     renderGutterUtility,
     getHoveredLine,
+    getAnnotationSlotName,
   });
   return (
     <DIFFS_TAG_NAME ref={ref} className={className} style={style}>

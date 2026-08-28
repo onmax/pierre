@@ -3,8 +3,6 @@
 import {
   type DiffLineAnnotation,
   type FileDiffMetadata,
-  isDiffAnnotationCollection,
-  isFileAnnotationCollection,
   type LineAnnotation,
   VirtualizedFile,
   VirtualizedFileDiff,
@@ -19,6 +17,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { ITEM_UNSAFE_CSS, LONG_README_FILE } from './constants';
 import type { SharedRenderOptions } from './PlaygroundClient';
 import { CommentForm, CommentThread } from './PlaygroundComments';
+import { createEditSessionButtons } from './PlaygroundEditButtons';
 
 interface PlaygroundVirtualizerViewProps {
   diffs: FileDiffMetadata[];
@@ -26,31 +25,6 @@ interface PlaygroundVirtualizerViewProps {
   enableLineSelection: boolean;
   enableGutterComments: boolean;
   showAnnotations: boolean;
-}
-
-// Both edit-toggle state icons, inlined as SVG markup. @pierre/icons ships
-// React components (used by the CodeView and React-Virtualizer toggles), but
-// this vanilla view builds DOM directly, so the same two glyphs
-// (IconCheckboxFill / IconSquircleLg) are inlined here. The shared
-// `.playground-edit-toggle` styles show whichever matches `aria-pressed`.
-const EDIT_TOGGLE_ICON_ON = `<svg class="playground-edit-toggle-icon-on" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C1.412 0 0 1.412 0 8s1.412 8 8 8 8-1.412 8-8-1.412-8-8-8m4.08 5.975a.75.75 0 0 0-1.16-.95L6.943 9.884 5.03 7.97a.75.75 0 0 0-1.06 1.06l2.5 2.5a.75.75 0 0 0 1.11-.055z"/></svg>`;
-const EDIT_TOGGLE_ICON_OFF = `<svg class="playground-edit-toggle-icon-off" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" clip-rule="evenodd" d="M1.788 4.296C1.588 5.194 1.5 6.387 1.5 8s.088 2.806.288 3.704c.196.88.478 1.381.802 1.706s.826.607 1.706.802c.898.2 2.091.288 3.704.288s2.806-.088 3.704-.288c.88-.195 1.381-.478 1.706-.802s.607-.826.802-1.706c.2-.898.288-2.091.288-3.704s-.088-2.806-.288-3.704c-.195-.88-.478-1.381-.802-1.706s-.826-.606-1.706-.802C10.806 1.588 9.613 1.5 8 1.5s-2.806.088-3.704.288c-.88.196-1.381.478-1.706.802s-.606.826-.802 1.706M0 8c0-6.588 1.412-8 8-8s8 1.412 8 8-1.412 8-8 8-8-1.412-8-8"/></svg>`;
-
-// Builds the per-file "Edit" toggle rendered into a diff header's metadata
-// slot. Slotted content is a light-DOM child of the diffs container, so the
-// app stylesheet reaches it: styling lives in the shared
-// `.playground-edit-toggle` class (globals.css), matching the CodeView and
-// React-Virtualizer toggles. Both state icons and both labels ("Edit" /
-// "Editing") are always present; CSS shows the pair matching `aria-pressed`,
-// so the caller only flips the attribute (and wires edit/cleanup) once the diff
-// instance exists.
-function createEditToggle(): HTMLButtonElement {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'playground-edit-toggle';
-  button.setAttribute('aria-pressed', 'false');
-  button.innerHTML = `${EDIT_TOGGLE_ICON_ON}${EDIT_TOGGLE_ICON_OFF}<span class="playground-edit-toggle-label-on">Editing</span><span class="playground-edit-toggle-label-off">Edit</span>`;
-  return button;
 }
 
 const VIRTUALIZER_CUSTOM_CSS = `${ITEM_UNSAFE_CSS}
@@ -92,10 +66,11 @@ function fileAnnotationKey(annotation: VirtualizerFileAnnotation): string {
 // PlaygroundVirtualizerElementView — so this view drives the imperative API
 // directly to get window/body scroll.
 //
-// Each diff header carries its own "Edit" checkbox (in the header metadata
-// slot); toggling it attaches a per-file Editor to that diff and flips its
-// new-file surface into contentEditable. Files are edited independently because
-// one Editor only binds to one instance at a time.
+// Each diff header carries its own Edit button (in the header metadata slot),
+// replaced by Cancel/Save while a session is active; Edit attaches a per-file
+// Editor to that diff and flips its new-file surface into contentEditable.
+// Files are edited independently because one Editor only binds to one instance
+// at a time.
 //
 // Gutter comments reuse the shared React CommentForm: the vanilla
 // renderAnnotation callback returns an element hosting a small React root.
@@ -117,6 +92,11 @@ export function PlaygroundVirtualizerView({
     useRef<VirtualizedFile<VirtualizerAnnotationMetadata> | null>(null);
   const fileAnnotationsRef = useRef<VirtualizerFileAnnotation[]>([]);
   const annotationsRef = useRef<VirtualizerAnnotation[][]>([]);
+  // The file/diffs currently shown: the fixtures until a session is saved,
+  // then the accepted values, so later rerenders do not paint the originals.
+  const currentFileRef = useRef(LONG_README_FILE);
+  const currentDiffsRef = useRef<FileDiffMetadata[]>([]);
+  const savedVersionRef = useRef(0);
   const annotationRootsRef = useRef(new Map<string, Root>());
   const annotationKeyCounterRef = useRef(0);
 
@@ -148,7 +128,7 @@ export function PlaygroundVirtualizerView({
 
     // The long README plain file leads the window-scroll list (as in
     // CodeView), driven by the vanilla VirtualizedFile. It carries the same
-    // header Edit toggle and line interactions as the diffs below. Its
+    // header edit buttons and line interactions as the diffs below. Its
     // container is appended first so it sits above the diffs in the page flow.
     const readmeContainer = document.createElement('diffs-container');
     readmeContainer.style.display = 'block';
@@ -161,31 +141,31 @@ export function PlaygroundVirtualizerView({
           preventScroll: true,
         });
       },
-      onChange: (_file, lineAnnotations) => {
-        if (
-          lineAnnotations == null ||
-          !isFileAnnotationCollection(lineAnnotations)
-        ) {
-          return;
-        }
-        const previous = fileAnnotationsRef.current;
-        if (previous === lineAnnotations) {
-          return;
-        }
-        fileAnnotationsRef.current = lineAnnotations;
-        const liveKeys = new Set(lineAnnotations.map(fileAnnotationKey));
-        for (const annotation of previous) {
-          const key = fileAnnotationKey(annotation);
-          if (!liveKeys.has(key)) {
-            unmountAnnotationRoot(key);
-          }
-        }
-      },
     });
-    const readmeToggle = createEditToggle();
+    // Save and Cancel both run the disposer from `edit()`, which ends the
+    // session on the instance and fires onEditComplete; Cancel marks the
+    // session first so the handler reverts instead of accepting.
+    let readmeDispose: (() => void) | undefined;
+    let readmeCancelled = false;
+    const endReadmeSession = () => {
+      readmeDispose?.();
+      readmeDispose = undefined;
+      readmeButtons.setEditing(false);
+    };
+    const readmeButtons = createEditSessionButtons({
+      onEdit() {
+        readmeDispose = readmeEditor.edit(fileInstance);
+        readmeButtons.setEditing(true);
+      },
+      onCancel() {
+        readmeCancelled = true;
+        endReadmeSession();
+      },
+      onSave: endReadmeSession,
+    });
     const rerenderReadmeWithAnnotations = () => {
       fileInstance.render({
-        file: LONG_README_FILE,
+        file: currentFileRef.current,
         lineAnnotations: [...fileAnnotationsRef.current],
       });
     };
@@ -212,11 +192,26 @@ export function PlaygroundVirtualizerView({
     const fileInstance = new VirtualizedFile<VirtualizerAnnotationMetadata>(
       {
         ...options,
-        renderHeaderMetadata: () => readmeToggle,
+        renderHeaderMetadata: () => readmeButtons.element,
         stickyHeader: true,
         unsafeCSS: VIRTUALIZER_CUSTOM_CSS,
         enableLineSelection: enableLineSelection && !enableGutterComments,
         enableGutterUtility: enableGutterComments && showAnnotations,
+        onEditComplete: (event) => {
+          if (readmeCancelled) {
+            readmeCancelled = false;
+            return 'reject';
+          }
+          savedVersionRef.current += 1;
+          event.file.cacheKey = `${event.file.name}:v${savedVersionRef.current}`;
+          currentFileRef.current = event.file;
+          // Adopt the session's final annotation positions so the comment
+          // roots stay matched to the accepted (moved) rows.
+          if (event.lineAnnotations != null) {
+            fileAnnotationsRef.current = event.lineAnnotations;
+          }
+          return 'accept';
+        },
         onGutterUtilityClick: (range) => {
           const lineNumber = range.end;
           if (
@@ -266,23 +261,15 @@ export function PlaygroundVirtualizerView({
       undefined,
       pool
     );
-    readmeToggle.addEventListener('click', () => {
-      const editing = readmeToggle.getAttribute('aria-pressed') !== 'true';
-      readmeToggle.setAttribute('aria-pressed', editing ? 'true' : 'false');
-      if (editing) {
-        readmeEditor.edit(fileInstance);
-      } else {
-        readmeEditor.cleanUp();
-      }
-    });
     fileInstance.render({
-      file: LONG_README_FILE,
+      file: currentFileRef.current,
       fileContainer: readmeContainer,
       lineAnnotations: fileAnnotationsRef.current,
     });
     fileInstanceRef.current = fileInstance;
 
     annotationsRef.current = diffs.map(() => []);
+    currentDiffsRef.current = [...diffs];
     const editors: Editor<VirtualizerAnnotationMetadata>[] = [];
     const instances = diffs.map((fileDiff, index) => {
       // `diffs-container` is the library's default (registered) container
@@ -292,11 +279,6 @@ export function PlaygroundVirtualizerView({
       fileContainer.style.display = 'block';
       content.appendChild(fileContainer);
 
-      // Edits remap annotation line numbers; onChange hands the remapped set
-      // back so this view's annotation source of truth follows the edit —
-      // otherwise the next host-driven render snaps comments back to their
-      // pre-edit lines. An annotation whose line was deleted is dropped from
-      // the set; retire its orphaned React root.
       const editor = new Editor<VirtualizerAnnotationMetadata>({
         onAttach(attachedEditor) {
           attachedEditor.focus({
@@ -304,37 +286,30 @@ export function PlaygroundVirtualizerView({
             preventScroll: true,
           });
         },
-        onChange: (_file, lineAnnotations) => {
-          if (
-            lineAnnotations == null ||
-            !isDiffAnnotationCollection(lineAnnotations)
-          ) {
-            return;
-          }
-          const previous = annotationsRef.current[index];
-          if (previous === lineAnnotations) {
-            return;
-          }
-          annotationsRef.current[index] = lineAnnotations;
-          const liveKeys = new Set(
-            lineAnnotations.map((annotation) =>
-              annotationKey(index, annotation)
-            )
-          );
-          for (const annotation of previous) {
-            const key = annotationKey(index, annotation);
-            if (!liveKeys.has(key)) {
-              unmountAnnotationRoot(key);
-            }
-          }
-        },
       });
       editors.push(editor);
-      const editToggle = createEditToggle();
+      let dispose: (() => void) | undefined;
+      let cancelled = false;
+      const endSession = () => {
+        dispose?.();
+        dispose = undefined;
+        buttons.setEditing(false);
+      };
+      const buttons = createEditSessionButtons({
+        onEdit() {
+          dispose = editor.edit(instance);
+          buttons.setEditing(true);
+        },
+        onCancel() {
+          cancelled = true;
+          endSession();
+        },
+        onSave: endSession,
+      });
 
       const rerenderWithAnnotations = () => {
         instance.render({
-          fileDiff,
+          fileDiff: currentDiffsRef.current[index] ?? fileDiff,
           lineAnnotations: [...annotationsRef.current[index]],
         });
       };
@@ -371,11 +346,24 @@ export function PlaygroundVirtualizerView({
         new VirtualizedFileDiff<VirtualizerAnnotationMetadata>(
           {
             ...options,
-            renderHeaderMetadata: () => editToggle,
+            renderHeaderMetadata: () => buttons.element,
             stickyHeader: true,
             unsafeCSS: VIRTUALIZER_CUSTOM_CSS,
             enableLineSelection: enableLineSelection && !enableGutterComments,
             enableGutterUtility: enableGutterComments && showAnnotations,
+            onEditComplete: (event) => {
+              if (cancelled) {
+                cancelled = false;
+                return 'reject';
+              }
+              savedVersionRef.current += 1;
+              event.fileDiff.cacheKey = `${event.fileDiff.name}:v${savedVersionRef.current}`;
+              currentDiffsRef.current[index] = event.fileDiff;
+              if (event.lineAnnotations != null) {
+                annotationsRef.current[index] = event.lineAnnotations;
+              }
+              return 'accept';
+            },
             onGutterUtilityClick: (range) => {
               const side = range.endSide ?? range.side;
               if (side == null) {
@@ -439,19 +427,6 @@ export function PlaygroundVirtualizerView({
           pool
         );
 
-      // Attaching the editor flips the new-file surface to contentEditable;
-      // detaching restores read-only review. The button tracks its own state on
-      // `aria-pressed` (which also drives the shared toggle styles).
-      editToggle.addEventListener('click', () => {
-        const editing = editToggle.getAttribute('aria-pressed') !== 'true';
-        editToggle.setAttribute('aria-pressed', editing ? 'true' : 'false');
-        if (editing) {
-          editor.edit(instance);
-        } else {
-          editor.cleanUp();
-        }
-      });
-
       instance.render({ fileDiff, fileContainer });
       return instance;
     });
@@ -486,7 +461,8 @@ export function PlaygroundVirtualizerView({
 
   // Apply live option changes to the existing instances. Spreading over
   // `instance.options` preserves each file's per-instance callbacks (edit
-  // checkbox, gutter/annotation handlers). No rerender is needed while
+  // buttons, completion, gutter/annotation handlers). No rerender is needed
+  // while
   // virtualized.
   useEffect(() => {
     for (const instance of instancesRef.current) {
@@ -520,7 +496,10 @@ export function PlaygroundVirtualizerView({
         unmountAnnotationRoot(fileAnnotationKey(annotation));
       }
       fileAnnotationsRef.current = [];
-      fileInstance.render({ file: LONG_README_FILE, lineAnnotations: [] });
+      fileInstance.render({
+        file: currentFileRef.current,
+        lineAnnotations: [],
+      });
     }
     instancesRef.current.forEach((instance, index) => {
       instance.setSelectedLines(null);
@@ -532,7 +511,10 @@ export function PlaygroundVirtualizerView({
         unmountAnnotationRoot(annotationKey(index, annotation));
       }
       annotationsRef.current[index] = [];
-      instance.render({ fileDiff: diffs[index], lineAnnotations: [] });
+      instance.render({
+        fileDiff: currentDiffsRef.current[index] ?? diffs[index],
+        lineAnnotations: [],
+      });
     });
   }, [showAnnotations, diffs]);
 

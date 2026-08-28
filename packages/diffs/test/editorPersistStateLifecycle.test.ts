@@ -496,10 +496,10 @@ describe('Editor persisted state lifecycle', () => {
         },
       ]);
 
-      editor.cleanUp(true);
+      editor.cleanUp('recycle');
       // A repeated teardown has no attached instance, but must not erase the
       // state-restoration request captured by the first cleanup.
-      editor.cleanUp(true);
+      editor.cleanUp('recycle');
       first.file.cleanUp(true);
       first = undefined;
 
@@ -791,11 +791,11 @@ describe('Editor persisted state lifecycle', () => {
     }> = [];
     const editor = new Editor<undefined>({
       persistState: true,
-      onChange(file, _lineAnnotations, event) {
+      onChange(event) {
         changes.push({
-          cacheKey: file.cacheKey,
+          cacheKey: event.file.cacheKey,
           changes: event.changes,
-          contents: file.contents,
+          contents: event.file.contents,
         });
       },
     });
@@ -925,7 +925,7 @@ describe('Editor persisted state lifecycle', () => {
     const changes: string[] = [];
     const editor = new Editor<undefined>({
       persistState: true,
-      onChange: (file) => changes.push(file.contents),
+      onChange: (event) => changes.push(event.file.contents),
     });
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -992,7 +992,7 @@ describe('Editor persisted state lifecycle', () => {
     const changes: string[] = [];
     const editor = new Editor<undefined>({
       persistState: true,
-      onChange: (file) => changes.push(file.contents),
+      onChange: (event) => changes.push(event.file.contents),
     });
     const container = document.createElement('div');
     document.body.appendChild(container);

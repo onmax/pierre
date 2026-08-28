@@ -549,6 +549,14 @@ export type DiffLineAnnotation<T = undefined> = {
   lineNumber: number;
 } & OptionalMetadata<T>;
 
+/**
+ * An edit-completion handler's decision: `'accept'` installs the completed
+ * value the event carries, `'reject'` restores the external input. The event
+ * is frozen, so re-key the accepted value in place (`event.file.cacheKey =
+ * '…'`) before returning `'accept'`.
+ */
+export type EditCompletionDecision = 'accept' | 'reject';
+
 export type CodeViewFileItem<T = undefined> = {
   id: string;
   type: 'file';
@@ -1077,12 +1085,35 @@ export interface DiffsEditableComponent<
   /**
    * Attach an editor to this component. The returned detach closure receives
    * `recycle: true` when the editor is only being released by a virtualized
-   * unmount (the session continues on remount) and no argument/false on a
-   * genuine session end.
+   * unmount (the session continues on remount) and no argument/false when the
+   * session ends.
    */
   attachEditor: (
     editor: DiffsEditor<LAnnotation>
   ) => (recycle?: boolean) => void;
+  /**
+   * Deliver `EditorChangeEvent` to the component's owner. The attached
+   * editor calls this with the same event object it reports through its own
+   * `onChange`; the component forwards it to its `onEditChange` option.
+   */
+  emitEditChange(event: EditorChangeEvent<LAnnotation, 'file' | 'diff'>): void;
+  /**
+   * End the edit session and settle which external value the component
+   * renders, running the component's `onEditComplete` when the session
+   * changed the contents. Does nothing once no session exists.
+   */
+  completeEditSession(): void;
+  /**
+   * Resolve the shadow-DOM slot name for one of this component's line
+   * annotations. While an edit session is active, the name each annotation
+   * carried when it entered the session is kept even as its line number is
+   * remapped, so slotted light-DOM content stays projected without the owner
+   * re-rendering it. Outside a session this is the plain position-derived
+   * name.
+   */
+  getAnnotationSlotName: (
+    annotation: LineAnnotation<LAnnotation> | DiffLineAnnotation<LAnnotation>
+  ) => string;
   applyDocumentChange: (
     textDocument: DiffsTextDocument,
     newLineAnnotations?: DiffLineAnnotation<LAnnotation>[],
@@ -1166,7 +1197,7 @@ export interface DiffsEditor<LAnnotation> {
   edit<T extends DiffsEditableComponent<LAnnotation>>(
     fileInstance: EditableInstance<T>
   ): () => void;
-  cleanUp(recycle?: boolean): void;
+  cleanUp(reason?: 'discard' | 'recycle' | 'complete'): void;
 }
 
 /**
@@ -1259,12 +1290,12 @@ export interface EditorChange extends ResolvedTextEdit {
 }
 
 /** The document state and normalized edits reported after an editor change. */
-export interface EditorChangeEvent<LAnnotation> {
+export interface EditorChangeEvent<LAnnotation, TMode extends 'file' | 'diff'> {
   changes: EditorChange[];
   file: FileContents;
-  lineAnnotations?:
-    | LineAnnotation<LAnnotation>[]
-    | DiffLineAnnotation<LAnnotation>[];
+  lineAnnotations?: TMode extends 'file'
+    ? LineAnnotation<LAnnotation>[]
+    : DiffLineAnnotation<LAnnotation>[];
 }
 
 /**
@@ -1306,12 +1337,5 @@ export interface DiffsTextDocument {
  * emit them through its own `onItemEditChange` option.
  */
 export interface CodeViewCreateEditorOptions<LAnnotation> {
-  onChange: (
-    file: FileContents,
-    lineAnnotations:
-      | LineAnnotation<LAnnotation>[]
-      | DiffLineAnnotation<LAnnotation>[]
-      | undefined,
-    event: EditorChangeEvent<LAnnotation>
-  ) => void;
+  onChange(event: EditorChangeEvent<LAnnotation, 'file' | 'diff'>): void;
 }

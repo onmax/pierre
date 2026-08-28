@@ -268,18 +268,11 @@ export interface EditorOptions<LAnnotation> {
     fileInstance: DiffsEditableComponent<LAnnotation>
   ) => void;
   /**
-   * Called whenever the editor document changes. Treat this as a document
-   * notification; do not feed the changes back into the editor or you will
-   * create loops.
+   * Called with an `EditorChangeEvent` whenever the editor document changes.
+   * Treat this as a document notification; do not feed the changes back into
+   * the editor or you will create loops.
    */
-  onChange?: (
-    file: FileContents,
-    lineAnnotations:
-      | LineAnnotation<LAnnotation>[]
-      | DiffLineAnnotation<LAnnotation>[]
-      | undefined,
-    event: EditorChangeEvent<LAnnotation>
-  ) => void;
+  onChange?: (event: EditorChangeEvent<LAnnotation, 'file' | 'diff'>) => void;
   /** Callback when the editor gains focus. */
   onFocus?: () => void;
   /** Callback when the editor loses focus. */
@@ -508,7 +501,11 @@ export class Editor<LAnnotation> implements DiffsEditor<LAnnotation> {
     this.#fileInstance = fileInstance;
     this.#initialize();
     this.#detach = fileInstance.attachEditor(this);
-    return () => this.cleanUp();
+    return () => {
+      const attachedInstance = this.#fileInstance;
+      this.cleanUp('complete');
+      attachedInstance?.completeEditSession();
+    };
   }
 
   /**
@@ -768,7 +765,17 @@ export class Editor<LAnnotation> implements DiffsEditor<LAnnotation> {
     this.#contentElement?.blur();
   }
 
-  cleanUp(recycle = false): void {
+  // 'discard' tears the editor down and nothing more: onEditComplete never
+  // fires, and the component keeps whatever session state it has.
+  //
+  // 'recycle' is a virtualization unmount: the document and its history are
+  // kept so the session resumes on the next edit() against the same file.
+  //
+  // 'complete' tears down like 'discard' as part of a session end; the
+  // caller runs completeEditSession() afterward, and any persisted document
+  // is dropped instead of stored.
+  cleanUp(reason: 'discard' | 'recycle' | 'complete' = 'discard'): void {
+    const recycle = reason === 'recycle';
     this.#invalidateOnAttach();
     if (!recycle) {
       this.#attachState.delivered = false;
@@ -776,7 +783,15 @@ export class Editor<LAnnotation> implements DiffsEditor<LAnnotation> {
     const hadFileInstance = this.#fileInstance != null;
     const shouldRestoreState = this.#options.persistState === true;
     this.#stateRestoreGeneration++;
-    this.#persistCurrentState();
+    if (reason === 'complete') {
+      // The session is over either way: an accepted result lives in the
+      // returned external value, and a rejected one must not come back on
+      // the next edit(). Drop the stored document instead of writing the
+      // edited text under the replaced file's key.
+      this.#dropPersistedDocument();
+    } else {
+      this.#persistCurrentState();
+    }
     if (hadFileInstance) {
       this.#restoreStateOnNextSync = shouldRestoreState;
     }
@@ -1356,6 +1371,25 @@ export class Editor<LAnnotation> implements DiffsEditor<LAnnotation> {
       this.#stateStorageOption = option;
     }
     return this.#stateStorage;
+  }
+
+  // Drop the attached file's cached document.
+  // Selection/scroll records are left alone.
+  #dropPersistedDocument(): void {
+    const fileInfo = this.#fileInfo;
+    if (
+      this.#options.persistState !== true ||
+      this.#fileInstance === undefined ||
+      fileInfo === undefined
+    ) {
+      return;
+    }
+    this.#textDocumentCache.delete(
+      requirePersistedCacheKey({
+        name: fileInfo.name,
+        cacheKey: this.#externalCacheKey,
+      })
+    );
   }
 
   #persistCurrentState(): void {
@@ -3603,7 +3637,12 @@ export class Editor<LAnnotation> implements DiffsEditor<LAnnotation> {
       // annotation rows together. Re-inserting those rows independently by
       // line number would break their visual alignment in split view.
       if (!this.#isDiff || !didLineCountChange) {
-        renderLineAnnotations(newLineAnnotations, contentEl, gutterEl);
+        renderLineAnnotations(
+          newLineAnnotations,
+          contentEl,
+          gutterEl,
+          fileInstance.getAnnotationSlotName
+        );
       }
     }
 
@@ -5711,10 +5750,16 @@ export class Editor<LAnnotation> implements DiffsEditor<LAnnotation> {
   ): void {
     const file = this.getFile();
     const onChange = this.#options.onChange;
-    if (file === undefined || onChange === undefined) {
+    if (file == null) {
       return;
     }
-    onChange(file, lineAnnotations, { changes, file, lineAnnotations });
+    const event: EditorChangeEvent<LAnnotation, 'file' | 'diff'> = {
+      changes,
+      file,
+      lineAnnotations,
+    };
+    onChange?.(event);
+    this.#fileInstance?.emitEditChange(event);
   }
 
   #applyChangeToLineAnnotations(

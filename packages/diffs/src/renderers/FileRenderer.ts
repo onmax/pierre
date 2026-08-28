@@ -148,6 +148,9 @@ export class FileRenderer<LAnnotation = undefined> {
 
   constructor(
     public options: FileRendererOptions = { theme: DEFAULT_THEMES },
+    private annotationSlotName: (
+      annotation: LineAnnotation<LAnnotation>
+    ) => string = getLineAnnotationName,
     private onRenderUpdate?: () => unknown,
     private workerManager?: WorkerPoolManager | undefined
   ) {
@@ -257,10 +260,25 @@ export class FileRenderer<LAnnotation = undefined> {
     }
   }
 
-  /** Leave edit-session mode. Rendering returns to the pool when one works. */
-  public endEditSession(): void {
+  /**
+   * Leave edit-session mode. Rendering returns to the pool when one works.
+   * When `settledFile` has the content the cache already shows, the cache
+   * adopts it as its identity so the next render treats it as current
+   * instead of a new file.
+   */
+  public endEditSession(settledFile?: FileContents): void {
     this.editSessionActive = false;
     this.pendingHighlightResult = undefined;
+    const { renderCache } = this;
+    if (
+      settledFile == null ||
+      renderCache == null ||
+      renderCache.file === settledFile ||
+      !areFileTargetsEqual(renderCache.file, settledFile)
+    ) {
+      return;
+    }
+    renderCache.file = settledFile;
   }
 
   /**
@@ -872,7 +890,7 @@ export class FileRenderer<LAnnotation = undefined> {
           hunkIndex: FILE_ANNOTATION_HUNK_INDEX,
           lineIndex: FILE_ANNOTATION_LINE_INDEX,
           annotations: fileLevelAnnotations.map((annotation) =>
-            getLineAnnotationName(annotation)
+            this.annotationSlotName(annotation)
           ),
         })
       );
@@ -915,7 +933,7 @@ export class FileRenderer<LAnnotation = undefined> {
             hunkIndex: 0,
             lineIndex: lineNumber,
             annotations: annotations.map((annotation) =>
-              getLineAnnotationName(annotation)
+              this.annotationSlotName(annotation)
             ),
           })
         );

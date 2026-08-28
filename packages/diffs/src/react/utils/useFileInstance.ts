@@ -1,4 +1,5 @@
 import {
+  type RefObject,
   useCallback,
   useContext,
   useEffect,
@@ -6,9 +7,14 @@ import {
   useRef,
 } from 'react';
 
-import { File, type FileOptions } from '../../components/File';
+import {
+  File,
+  type FileEditCompleteEvent,
+  type FileEditCompleteHandler,
+  type FileOptions,
+} from '../../components/File';
 import { VirtualizedFile } from '../../components/VirtualizedFile';
-import type { EditorOptions } from '../../edit';
+import type { EditorChangeEvent, EditorOptions } from '../../edit';
 import type { GetHoveredLineResult } from '../../managers/InteractionManager';
 import type {
   FileContents,
@@ -16,7 +22,9 @@ import type {
   SelectedLineRange,
   VirtualFileMetrics,
 } from '../../types';
+import { areFileTargetsEqual } from '../../utils/areFileTargetsEqual';
 import { areOptionsEqual } from '../../utils/areOptionsEqual';
+import { getLineAnnotationName } from '../../utils/getLineAnnotationName';
 import { noopRender } from '../constants';
 import { useCreateEditor } from '../EditContext';
 import { useVirtualizer } from '../Virtualizer';
@@ -25,6 +33,17 @@ import { useStableCallback } from './useStableCallback';
 
 const useIsomorphicLayoutEffect =
   typeof window === 'undefined' ? useEffect : useLayoutEffect;
+
+interface AcceptedCompletion<LAnnotation> {
+  file: {
+    installed: FileContents;
+    stale: FileContents;
+  } | null;
+  annotations: {
+    installed: LineAnnotation<LAnnotation>[] | undefined;
+    stale: LineAnnotation<LAnnotation>[];
+  } | null;
+}
 
 interface UseFileInstanceProps<LAnnotation> {
   file: FileContents;
@@ -38,15 +57,14 @@ interface UseFileInstanceProps<LAnnotation> {
   hasCustomHeader: boolean;
   disableWorkerPool: boolean;
   edit: boolean;
-  onChange?: (
-    file: FileContents,
-    lineAnnotations?: LineAnnotation<LAnnotation>[]
-  ) => void;
+  onEditChange?(event: EditorChangeEvent<LAnnotation, 'file'>): void;
+  onEditComplete: FileEditCompleteHandler<LAnnotation> | undefined;
 }
 
-interface UseFileInstanceReturn {
+interface UseFileInstanceReturn<LAnnotation> {
   ref(node: HTMLElement | null): void;
   getHoveredLine(): GetHoveredLineResult<'file'> | undefined;
+  getAnnotationSlotName(annotation: LineAnnotation<LAnnotation>): string;
 }
 
 export function useFileInstance<LAnnotation>({
@@ -61,11 +79,39 @@ export function useFileInstance<LAnnotation>({
   hasCustomHeader,
   disableWorkerPool,
   edit,
-}: UseFileInstanceProps<LAnnotation>): UseFileInstanceReturn {
+  onEditChange: _onEditChange,
+  onEditComplete: _onEditComplete,
+}: UseFileInstanceProps<LAnnotation>): UseFileInstanceReturn<LAnnotation> {
   const simpleVirtualizer = useVirtualizer();
   const controlledSelection = selectedLines !== undefined;
   const poolManager = useContext(WorkerPoolContext);
   const createEditor = useCreateEditor<LAnnotation>();
+  const handleOnEditChange = useStableCallback(
+    (event: EditorChangeEvent<LAnnotation, 'file'>) => _onEditChange?.(event)
+  );
+  const onEditChange = _onEditChange != null ? handleOnEditChange : undefined;
+  // An accepted completion installs its file on the instance immediately,
+  // but the file/lineAnnotations props stay pre-edit until the owner's state
+  // update lands. This holds the accepted values so the renders in between do
+  // not repaint pre-edit state.
+  const acceptedCache = useRef<AcceptedCompletion<LAnnotation> | null>(null);
+  const handleOnEditComplete = useStableCallback(
+    (event: FileEditCompleteEvent<LAnnotation>) => {
+      const decision = _onEditComplete?.(event) ?? 'reject';
+      if (decision === 'accept') {
+        acceptedCache.current = {
+          file: { installed: event.file, stale: event.originalFile },
+          annotations: {
+            installed: event.lineAnnotations,
+            stale: event.originalLineAnnotations,
+          },
+        };
+      }
+      return decision;
+    }
+  );
+  const onEditComplete =
+    _onEditComplete != null ? handleOnEditComplete : undefined;
   const instanceRef = useRef<
     File<LAnnotation> | VirtualizedFile<LAnnotation> | null
   >(null);
@@ -82,6 +128,8 @@ export function useFileInstance<LAnnotation>({
             controlledSelection,
             hasCustomHeader,
             hasGutterRenderUtility,
+            onEditChange,
+            onEditComplete,
             options,
           }),
           simpleVirtualizer,
@@ -95,6 +143,8 @@ export function useFileInstance<LAnnotation>({
             controlledSelection,
             hasCustomHeader,
             hasGutterRenderUtility,
+            onEditChange,
+            onEditComplete,
             options,
           }),
           !disableWorkerPool ? poolManager : undefined,
@@ -122,6 +172,8 @@ export function useFileInstance<LAnnotation>({
       controlledSelection,
       hasCustomHeader,
       hasGutterRenderUtility,
+      onEditChange,
+      onEditComplete,
       options,
     });
     // setOptions(undefined) is a no-op, so an undefined merge result never
@@ -130,8 +182,17 @@ export function useFileInstance<LAnnotation>({
     const forceRender =
       newOptions !== undefined &&
       !areOptionsEqual(instanceRef.current.options, newOptions);
+    const resolved = resolveAcceptedValues(
+      file,
+      lineAnnotations,
+      acceptedCache
+    );
     instanceRef.current.setOptions(newOptions);
-    void instanceRef.current.render({ file, lineAnnotations, forceRender });
+    void instanceRef.current.render({
+      file: resolved.file,
+      lineAnnotations: resolved.lineAnnotations,
+      forceRender,
+    });
     if (selectedLines !== undefined) {
       instanceRef.current.setSelectedLines(selectedLines);
     }
@@ -163,7 +224,51 @@ export function useFileInstance<LAnnotation>({
     | undefined => {
     return instanceRef.current?.getHoveredLine();
   }, []);
-  return { ref, getHoveredLine };
+  const getAnnotationSlotName = useCallback(
+    (annotation: LineAnnotation<LAnnotation>): string =>
+      instanceRef.current?.getAnnotationSlotName(annotation) ??
+      getLineAnnotationName(annotation),
+    []
+  );
+  return { ref, getHoveredLine, getAnnotationSlotName };
+}
+
+// Return the installed values in place of props that still match their stale
+// counterparts. Any other prop value clears its half, and the ref clears once
+// both halves have.
+function resolveAcceptedValues<LAnnotation>(
+  file: FileContents,
+  lineAnnotations: LineAnnotation<LAnnotation>[] | undefined,
+  acceptedCache: RefObject<AcceptedCompletion<LAnnotation> | null>
+): {
+  file: FileContents;
+  lineAnnotations: LineAnnotation<LAnnotation>[] | undefined;
+} {
+  const { current: accepted } = acceptedCache;
+  if (accepted == null) {
+    return { file, lineAnnotations };
+  }
+  const { file: acceptedFiles, annotations: acceptedAnnotations } = accepted;
+  let resolvedFile = file;
+  if (acceptedFiles != null) {
+    if (areFileTargetsEqual(file, acceptedFiles.stale)) {
+      resolvedFile = acceptedFiles.installed;
+    } else {
+      accepted.file = null;
+    }
+  }
+  let resolvedAnnotations = lineAnnotations;
+  if (acceptedAnnotations != null) {
+    if (lineAnnotations === acceptedAnnotations.stale) {
+      resolvedAnnotations = acceptedAnnotations.installed;
+    } else {
+      accepted.annotations = null;
+    }
+  }
+  if (accepted.file == null && accepted.annotations == null) {
+    acceptedCache.current = null;
+  }
+  return { file: resolvedFile, lineAnnotations: resolvedAnnotations };
 }
 
 interface MergeFileOptionsProps<LAnnotation> {
@@ -171,6 +276,8 @@ interface MergeFileOptionsProps<LAnnotation> {
   controlledSelection: boolean;
   hasGutterRenderUtility: boolean;
   hasCustomHeader: boolean;
+  onEditChange?(event: EditorChangeEvent<LAnnotation, 'file'>): void;
+  onEditComplete: FileEditCompleteHandler<LAnnotation> | undefined;
 }
 
 function mergeFileOptions<LAnnotation>({
@@ -178,9 +285,15 @@ function mergeFileOptions<LAnnotation>({
   controlledSelection,
   hasCustomHeader,
   hasGutterRenderUtility,
+  onEditChange,
+  onEditComplete,
 }: MergeFileOptionsProps<LAnnotation>): FileOptions<LAnnotation> | undefined {
   const needsReactOverrides =
-    controlledSelection || hasGutterRenderUtility || hasCustomHeader;
+    controlledSelection ||
+    hasGutterRenderUtility ||
+    hasCustomHeader ||
+    onEditChange != null ||
+    onEditComplete != null;
 
   if (!needsReactOverrides) {
     return options;
@@ -195,5 +308,7 @@ function mergeFileOptions<LAnnotation>({
     renderGutterUtility: hasGutterRenderUtility
       ? noopRender
       : options?.renderGutterUtility,
+    onEditChange,
+    onEditComplete,
   };
 }

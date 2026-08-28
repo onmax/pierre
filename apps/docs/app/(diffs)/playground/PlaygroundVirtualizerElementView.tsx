@@ -3,11 +3,11 @@
 import {
   type AnnotationSide,
   type DiffLineAnnotation,
+  type FileDiffEditCompleteEvent,
   type FileDiffMetadata,
   type FileDiffOptions,
+  type FileEditCompleteEvent,
   type FileOptions,
-  isDiffAnnotationCollection,
-  isFileAnnotationCollection,
   type LineAnnotation,
   type SelectedLineRange,
 } from '@pierre/diffs';
@@ -18,14 +18,13 @@ import {
   useStableCallback,
   Virtualizer,
 } from '@pierre/diffs/react';
-import { IconCheckboxFill, IconSquircleLg } from '@pierre/icons';
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { flushSync } from 'react-dom';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type { PlaygroundAnnotationMetadata } from './constants';
 import { ITEM_UNSAFE_CSS, LONG_README_FILE } from './constants';
 import type { SharedRenderOptions } from './PlaygroundClient';
 import { CommentForm, CommentThread } from './PlaygroundComments';
+import { EditSessionButtons } from './PlaygroundEditButtons';
 
 const SCROLL_REGION_STYLES = { height: '70vh', overflow: 'auto' } as const;
 
@@ -94,7 +93,12 @@ function ElementVirtualizerFile({
   enableGutterComments,
   showAnnotations,
 }: ElementVirtualizerFileProps) {
+  const [file, setFile] = useState(LONG_README_FILE);
   const [editing, setEditing] = useState(false);
+  // Cancel marks the session before turning edit off; the completion handler
+  // consumes the mark to revert instead of accept.
+  const cancelled = useRef(false);
+  const savedVersion = useRef(0);
   const [annotations, setAnnotations] = useState<
     LineAnnotation<PlaygroundAnnotationMetadata>[]
   >([]);
@@ -107,17 +111,28 @@ function ElementVirtualizerFile({
       onAttach(editor) {
         editor.focus({ lineNumber: 'first-visible', preventScroll: true });
       },
-      onChange(_file, lineAnnotations) {
-        if (
-          lineAnnotations != null &&
-          isFileAnnotationCollection(lineAnnotations)
-        ) {
-          flushSync(() => {
-            setAnnotations(lineAnnotations);
-          });
-        }
-      },
     }),
+    []
+  );
+
+  // Save accepts the completed file under a fresh cacheKey and stores it as
+  // the surface's file; Cancel reverts to the current one.
+  const handleEditComplete = useCallback(
+    (event: FileEditCompleteEvent<PlaygroundAnnotationMetadata>) => {
+      if (cancelled.current) {
+        cancelled.current = false;
+        return 'reject';
+      }
+      savedVersion.current += 1;
+      event.file.cacheKey = `${event.file.name}:v${savedVersion.current}`;
+      setFile(event.file);
+      // Adopt the session's final annotation positions so the comment
+      // portals render into the accepted (moved) slots.
+      if (event.lineAnnotations != null) {
+        setAnnotations(event.lineAnnotations);
+      }
+      return 'accept';
+    },
     []
   );
 
@@ -211,33 +226,30 @@ function ElementVirtualizerFile({
 
   // Must NOT be a stable callback — see ElementVirtualizerDiff's
   // renderHeaderMetadata for why a per-`editing` useCallback is required.
-  const renderHeaderMetadata = useCallback(() => {
-    return (
-      <button
-        type="button"
-        onClick={() => setEditing((current) => !current)}
-        aria-pressed={editing}
-        className="playground-edit-toggle"
-      >
-        <IconCheckboxFill
-          size={12}
-          className="playground-edit-toggle-icon-on"
-        />
-        <IconSquircleLg size={12} className="playground-edit-toggle-icon-off" />
-        <span className="playground-edit-toggle-label-on">Editing</span>
-        <span className="playground-edit-toggle-label-off">Edit</span>
-      </button>
-    );
-  }, [editing]);
+  const renderHeaderMetadata = useCallback(
+    () => (
+      <EditSessionButtons
+        editing={editing}
+        onEdit={() => setEditing(true)}
+        onCancel={() => {
+          cancelled.current = true;
+          setEditing(false);
+        }}
+        onSave={() => setEditing(false)}
+      />
+    ),
+    [editing]
+  );
 
   return (
     <File
-      file={LONG_README_FILE}
+      file={file}
       edit={editing}
       selectedLines={selectedLines}
       lineAnnotations={showAnnotations ? annotations : EMPTY_FILE_ANNOTATIONS}
       options={fileOptions}
       editorOptions={editorOptions}
+      onEditComplete={handleEditComplete}
       renderHeaderMetadata={renderHeaderMetadata}
       renderAnnotation={renderAnnotation}
     />
@@ -266,7 +278,12 @@ function ElementVirtualizerDiff({
   enableGutterComments,
   showAnnotations,
 }: ElementVirtualizerDiffProps) {
+  const [currentDiff, setCurrentDiff] = useState(fileDiff);
   const [editing, setEditing] = useState(false);
+  // Cancel marks the session before turning edit off; the completion handler
+  // consumes the mark to revert instead of accept.
+  const cancelled = useRef(false);
+  const savedVersion = useRef(0);
   const [annotations, setAnnotations] = useState<
     DiffLineAnnotation<PlaygroundAnnotationMetadata>[]
   >([]);
@@ -274,28 +291,31 @@ function ElementVirtualizerDiff({
     null
   );
 
-  // Edits remap annotation line numbers; onChange hands the remapped set back
-  // so the `lineAnnotations` prop — and the React-slotted comment content
-  // keyed by line number — follows the edit. The flushSync matters: the
-  // editor renamed the shadow-DOM annotation slots during this same
-  // keystroke, and a scheduled commit would leave the comments projected
-  // nowhere for the frames in between.
   const editorOptions = useMemo<EditorOptions<PlaygroundAnnotationMetadata>>(
     () => ({
       onAttach(editor) {
         editor.focus({ lineNumber: 'first-visible', preventScroll: true });
       },
-      onChange(_file, lineAnnotations) {
-        if (
-          lineAnnotations != null &&
-          isDiffAnnotationCollection(lineAnnotations)
-        ) {
-          flushSync(() => {
-            setAnnotations(lineAnnotations);
-          });
-        }
-      },
     }),
+    []
+  );
+
+  // Save accepts the completed diff under a fresh cacheKey and stores it as
+  // the surface's diff; Cancel reverts to the current one.
+  const handleEditComplete = useCallback(
+    (event: FileDiffEditCompleteEvent<PlaygroundAnnotationMetadata>) => {
+      if (cancelled.current) {
+        cancelled.current = false;
+        return 'reject';
+      }
+      savedVersion.current += 1;
+      event.fileDiff.cacheKey = `${event.fileDiff.name}:v${savedVersion.current}`;
+      setCurrentDiff(event.fileDiff);
+      if (event.lineAnnotations != null) {
+        setAnnotations(event.lineAnnotations);
+      }
+      return 'accept';
+    },
     []
   );
 
@@ -413,33 +433,30 @@ function ElementVirtualizerDiff({
   // state) through a stable wrapper would render the button one toggle behind —
   // the header would reflect the previous `editing` value. A per-`editing`
   // useCallback hands renderDiffChildren the current closure each toggle.
-  const renderHeaderMetadata = useCallback(() => {
-    return (
-      <button
-        type="button"
-        onClick={() => setEditing((current) => !current)}
-        aria-pressed={editing}
-        className="playground-edit-toggle"
-      >
-        <IconCheckboxFill
-          size={12}
-          className="playground-edit-toggle-icon-on"
-        />
-        <IconSquircleLg size={12} className="playground-edit-toggle-icon-off" />
-        <span className="playground-edit-toggle-label-on">Editing</span>
-        <span className="playground-edit-toggle-label-off">Edit</span>
-      </button>
-    );
-  }, [editing]);
+  const renderHeaderMetadata = useCallback(
+    () => (
+      <EditSessionButtons
+        editing={editing}
+        onEdit={() => setEditing(true)}
+        onCancel={() => {
+          cancelled.current = true;
+          setEditing(false);
+        }}
+        onSave={() => setEditing(false)}
+      />
+    ),
+    [editing]
+  );
 
   return (
     <FileDiff
-      fileDiff={fileDiff}
+      fileDiff={currentDiff}
       edit={editing}
       selectedLines={selectedLines}
       lineAnnotations={showAnnotations ? annotations : EMPTY_ANNOTATIONS}
       options={fileDiffOptions}
       editorOptions={editorOptions}
+      onEditComplete={handleEditComplete}
       renderHeaderMetadata={renderHeaderMetadata}
       renderAnnotation={renderAnnotation}
     />

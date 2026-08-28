@@ -1,5 +1,9 @@
 'use client';
 
+import type {
+  FileDiffEditCompleteEvent,
+  FileDiffEditCompleteHandler,
+} from '../components/FileDiff';
 import { DIFFS_TAG_NAME } from '../constants';
 import type { FileDiffMetadata } from '../types';
 import type { DiffBasePropsReact } from './types';
@@ -7,7 +11,11 @@ import { renderDiffChildren } from './utils/renderDiffChildren';
 import { templateRender } from './utils/templateRender';
 import { useFileDiffInstance } from './utils/useFileDiffInstance';
 
-export type { FileDiffMetadata };
+export type {
+  FileDiffEditCompleteEvent,
+  FileDiffEditCompleteHandler,
+  FileDiffMetadata,
+};
 
 export interface FileDiffProps<
   LAnnotation,
@@ -34,8 +42,10 @@ export function FileDiff<LAnnotation = undefined>({
   renderGutterUtility,
   disableWorkerPool = false,
   edit = false,
+  onEditChange,
+  onEditComplete,
 }: FileDiffProps<LAnnotation>): React.JSX.Element {
-  const { ref, getHoveredLine } = useFileDiffInstance({
+  const { ref, getHoveredLine, getAnnotationSlotName } = useFileDiffInstance({
     fileDiff,
     options,
     editorOptions,
@@ -47,6 +57,8 @@ export function FileDiff<LAnnotation = undefined>({
     hasCustomHeader: renderCustomHeader != null,
     disableWorkerPool,
     edit,
+    onEditChange,
+    onEditComplete,
   });
   const children = renderDiffChildren({
     fileDiff,
@@ -58,6 +70,7 @@ export function FileDiff<LAnnotation = undefined>({
     renderGutterUtility,
     lineAnnotations,
     getHoveredLine,
+    getAnnotationSlotName,
   });
   return (
     <DIFFS_TAG_NAME ref={ref} className={className} style={style}>

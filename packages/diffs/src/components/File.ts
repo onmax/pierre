@@ -26,10 +26,13 @@ import { SVGSpriteSheet } from '../sprite';
 import type {
   AppliedThemeStyleCache,
   BaseCodeOptions,
+  DiffLineAnnotation,
   DiffsEditableComponent,
   DiffsEditor,
   DiffsTextDocument,
+  EditCompletionDecision,
   EditorActiveLineOptions,
+  EditorChangeEvent,
   FileContents,
   HighlightedToken,
   LineAnnotation,
@@ -53,6 +56,12 @@ import {
   wrapThemeCSS,
   wrapUnsafeCSS,
 } from '../utils/cssWrappers';
+import {
+  adoptEditSessionAnnotations,
+  type EditSessionAnnotations,
+  resolveEditSessionSlotName,
+  writeEditSessionAnnotations,
+} from '../utils/editSessionAnnotations';
 import { getFileRendererOptions } from '../utils/getFileRendererOptions';
 import { getFiletypeFromFileName } from '../utils/getFiletypeFromFileName';
 import { getLineAnnotationName } from '../utils/getLineAnnotationName';
@@ -89,6 +98,40 @@ export interface FileHydrateProps<LAnnotation> extends Omit<
   prerenderedHTML?: string;
 }
 
+/**
+ * `onEditComplete` event argument when an edit session ends with changed
+ * contents.
+ *
+ * `file` is a fresh FileContents with the edited contents and no `cacheKey`
+ * set; accepting installs it.
+ *
+ * `originalFile` is the last `file` the component was given externally; a
+ * revert restores it.
+ *
+ * `lineAnnotations` is the completed annotation collection, potentially
+ * modified based on the edit changes to keep annotations aligned to their
+ * intended targets
+ *
+ * `originalLineAnnotations` is the last collection provided to the component
+ * externally, which a revert keeps.
+ */
+export interface FileEditCompleteEvent<LAnnotation> {
+  file: FileContents;
+  lineAnnotations: LineAnnotation<LAnnotation>[] | undefined;
+  originalFile: FileContents;
+  originalLineAnnotations: LineAnnotation<LAnnotation>[];
+}
+
+/**
+ * Decides a completed edit synchronously: return `'accept'` to install the
+ * event's `file`, or `'reject'` to restore `originalFile`. The event is frozen,
+ * so re-key the accepted file in place (`event.file.cacheKey = '…'`) before
+ * accepting. A missing handler rejects.
+ */
+export type FileEditCompleteHandler<LAnnotation> = (
+  event: FileEditCompleteEvent<LAnnotation>
+) => EditCompletionDecision;
+
 export interface FileOptions<LAnnotation>
   extends BaseCodeOptions, InteractionManagerBaseOptions<'file'> {
   disableFileHeader?: boolean;
@@ -114,6 +157,22 @@ export interface FileOptions<LAnnotation>
     instance: File<LAnnotation>,
     phase: PostRenderPhase
   ): unknown;
+
+  /**
+   * Fired for every document change of an active edit session on this
+   * component, with the same `EditorChangeEvent` the editor reports through
+   * its own `onChange`. Do not feed the event's file back into the component
+   * while the session is active.
+   */
+  onEditChange?(event: EditorChangeEvent<LAnnotation, 'file'>): void;
+
+  /**
+   * Fired when `edit` toggles false or a component unmounts. Only called if
+   * there are content changes resolving in a new file. If no callback is
+   * provided, then the component will always revert back to the last `file`
+   * passed into the component
+   */
+  onEditComplete?: FileEditCompleteHandler<LAnnotation>;
 }
 
 interface AnnotationElementCache<LAnnotation> {
@@ -215,6 +274,9 @@ export class File<
 
   public file: FileContents | undefined;
   private editSessionFile: FileContents | undefined;
+  private editSessionAnnotations:
+    | EditSessionAnnotations<LineAnnotation<LAnnotation>>
+    | undefined;
   private pendingEditSessionReplacement:
     | PendingEditSessionReplacement
     | undefined;
@@ -234,6 +296,7 @@ export class File<
   ) {
     this.fileRenderer = new FileRenderer<LAnnotation>(
       options,
+      this.getAnnotationSlotName,
       this.handleHighlightRender,
       this.workerManager
     );
@@ -244,6 +307,16 @@ export class File<
     );
     this.workerManager?.subscribeToThemeChanges(this);
   }
+
+  public getAnnotationSlotName = (
+    annotation: LineAnnotation<LAnnotation> | DiffLineAnnotation<LAnnotation>
+  ): string => {
+    return resolveEditSessionSlotName(
+      this.editSessionAnnotations,
+      annotation,
+      getLineAnnotationName
+    );
+  };
 
   private handleHighlightRender = (): void => {
     this.rerender();
@@ -271,7 +344,40 @@ export class File<
     return this.renderedFile;
   }
 
-  protected updateExternalFile(incomingFile: FileContents): boolean {
+  protected getLatestAnnotations(): LineAnnotation<LAnnotation>[] {
+    return this.editSessionAnnotations?.current ?? this.lineAnnotations;
+  }
+
+  // Returns true when the caller passed annotations this component has not
+  // handled yet. Re-renders often re-pass an annotations array the component
+  // already holds — the external one, or one the active session tracks — and
+  // treating those repeats as new writes would move annotations, so they are
+  // recognized by identity and ignored.
+  protected isNewAnnotations(
+    lineAnnotations: LineAnnotation<LAnnotation>[]
+  ): boolean {
+    const {
+      editSessionAnnotations: session,
+      lineAnnotations: externalAnnotations,
+    } = this;
+    if (lineAnnotations === externalAnnotations) {
+      return false;
+    }
+    return (
+      session == null ||
+      (lineAnnotations !== session.provided &&
+        lineAnnotations !== session.current)
+    );
+  }
+
+  // Install a replacement file from the caller; returns false when it is the
+  // file already installed. During an edit session, the outgoing session file
+  // and cache key are kept aside until the editor syncs — it uses them to
+  // decide whether the swap keeps or resets undo history.
+  protected updateExternalFile(
+    incomingFile: FileContents,
+    lineAnnotations?: LineAnnotation<LAnnotation>[]
+  ): boolean {
     if (areFileTargetsEqual(this.file, incomingFile)) {
       return false;
     }
@@ -300,6 +406,18 @@ export class File<
       this.createInitialEditSession(this.editor, incomingFile);
     } else {
       this.editSessionFile = undefined;
+    }
+    if (this.editSessionAnnotations != null && lineAnnotations != null) {
+      // These annotations arrived with the new file, so their line numbers
+      // describe it. The positions the session tracked for the old document
+      // mean nothing now: the session restarts from these annotations, and
+      // they also become what renders once the session ends.
+      this.lineAnnotations = lineAnnotations;
+      this.editSessionAnnotations = adoptEditSessionAnnotations(
+        lineAnnotations,
+        getLineAnnotationName,
+        this.editSessionAnnotations
+      );
     }
     return true;
   }
@@ -407,7 +525,50 @@ export class File<
   public setLineAnnotations(
     lineAnnotations: LineAnnotation<LAnnotation>[]
   ): void {
+    const { editSessionAnnotations: sessionAnnotations } = this;
+    if (sessionAnnotations == null) {
+      this.lineAnnotations = lineAnnotations;
+      return;
+    }
+    if (!this.isNewAnnotations(lineAnnotations)) {
+      return;
+    }
+    // Externally provided annotations are the source of truth: they become the
+    // new external collection and the session renders them at the line numbers
+    // given. The caller owns whether those positions still make sense after an
+    // edit; a revert renders this collection unchanged rather than moving them.
     this.lineAnnotations = lineAnnotations;
+    writeEditSessionAnnotations(
+      sessionAnnotations,
+      lineAnnotations,
+      getLineAnnotationName
+    );
+  }
+
+  // Takes annotations the editor remapped and makes them what the session
+  // renders: updates the session, feeds the renderer, and re-renders
+  // annotation rows. Returns true when new annotations were adopted —
+  // virtualized subclasses override this and refresh their layout on true.
+  //
+  // The editor delivers annotations through two calls. An edit that changes
+  // the line count sends them with the structural rebuild
+  // (applyDocumentChange) and again with the change event (emitEditChange);
+  // the identity check makes the second call a no-op. An edit that keeps the
+  // line count skips the rebuild, so the event is its only path here.
+  //
+  // The annotations the caller passed in are never touched — stale
+  // re-renders keep deduping against them.
+  protected syncEditSessionAnnotationsFromEditor(
+    lineAnnotations: LineAnnotation<LAnnotation>[]
+  ): boolean {
+    const { editSessionAnnotations: session } = this;
+    if (session == null || lineAnnotations === session.current) {
+      return false;
+    }
+    session.current = lineAnnotations;
+    this.fileRenderer.setLineAnnotations(lineAnnotations);
+    this.renderAnnotations();
+    return true;
   }
 
   public setSelectedLines(
@@ -459,14 +620,19 @@ export class File<
   }
 
   protected shouldApplyColumnVariables(overflow: 'scroll' | 'wrap'): boolean {
-    return overflow === 'scroll' && this.lineAnnotations.length > 0;
+    return overflow === 'scroll' && this.getLatestAnnotations().length > 0;
   }
 
   public cleanUp(recycle = false): void {
     this.emitPostRender(true);
-    // Persist editor state while the code scroller still exists.
-    this.editor?.cleanUp(recycle);
+    // Tear the editor down while the code scroller still exists. A recycle
+    // persists its editor state; a full teardown ends the session, so the
+    // editor drops its stored document instead.
+    this.editor?.cleanUp(recycle ? 'recycle' : 'complete');
     this.editor = undefined;
+    if (!recycle) {
+      this.settleEditSession(false);
+    }
     this.resizeManager.cleanUp();
     this.interactionManager.cleanUp();
     this.managersDirty = false;
@@ -518,6 +684,7 @@ export class File<
       this.workerManager = undefined;
       this.file = undefined;
       this.editSessionFile = undefined;
+      this.editSessionAnnotations = undefined;
       this.pendingEditSessionReplacement = undefined;
       this.pendingPersistedDocumentRestore = undefined;
       this.renderedFile = undefined;
@@ -655,7 +822,8 @@ export class File<
   }
 
   private syncRenderViewToEditor(): void {
-    const { editor, fileContainer, lineAnnotations, renderRange } = this;
+    const { editor, fileContainer, renderRange } = this;
+    const lineAnnotations = this.getLatestAnnotations();
     const file = this.getLatestFile();
     if (editor == null || fileContainer == null || file == null) {
       return;
@@ -669,8 +837,11 @@ export class File<
       ) {
         return;
       }
-      const { pendingEditSessionReplacement: replacement } = this;
-      const externalFile = this.file;
+      const {
+        pendingEditSessionReplacement: replacement,
+        file: externalFile,
+        pendingPersistedDocumentRestore: pendingRestore,
+      } = this;
       const externalDocument =
         replacement != null &&
         externalFile != null &&
@@ -682,7 +853,6 @@ export class File<
         replacement != null && !externalDocument
           ? replacement.prevExternalCacheKey
           : externalFile?.cacheKey;
-      const pendingRestore = this.pendingPersistedDocumentRestore;
       const restoredDocument =
         pendingRestore?.editSessionFile === file
           ? pendingRestore.previousContents
@@ -707,9 +877,22 @@ export class File<
     });
   }
 
+  public emitEditChange(event: EditorChangeEvent<LAnnotation, 'file'>): void {
+    const { lineAnnotations } = event;
+    if (lineAnnotations != null) {
+      this.syncEditSessionAnnotationsFromEditor(lineAnnotations);
+    }
+    const { onEditChange } = this.options;
+    onEditChange?.(event);
+  }
+
   public attachEditor(editor: DiffsEditor<LAnnotation>): () => void {
     this.editor?.cleanUp();
     this.editor = editor;
+    this.editSessionAnnotations ??= adoptEditSessionAnnotations(
+      this.lineAnnotations,
+      getLineAnnotationName
+    );
     if (this.editSessionFile == null && this.file != null) {
       this.createInitialEditSession(editor, this.file);
     } else {
@@ -732,12 +915,128 @@ export class File<
     };
   }
 
+  /**
+   * Ends the edit session and settles which file this component renders.
+   * Requires the editor to be detached first. Does nothing when no session
+   * exists, so callers can invoke it again safely after it has settled.
+   *
+   * When the edited text matches the external file (including edits undone
+   * all the way back), the session is discarded without calling
+   * `onEditComplete`: the external file stays, and annotations keep the
+   * session's collection so annotation writes made during the session
+   * survive.
+   *
+   * When the text changed, `onEditComplete` receives a fresh keyless
+   * `FileContents` holding the edited text, alongside the current external
+   * file and the session's annotations. Returning the event's `file` installs
+   * it as the new external value together with those annotations. Returning
+   * `null`, returning the exact `originalFile`, or having no handler restores
+   * the external file and its annotations. Any other return throws, as does
+   * an accepted file reusing the replaced file's `cacheKey` — in both cases
+   * the component still leaves the session on the external file before the
+   * error propagates.
+   */
+  public completeEditSession(): void {
+    this.settleEditSession(true);
+  }
+
+  private settleEditSession(installResult: boolean): void {
+    const {
+      editSessionFile,
+      editSessionAnnotations,
+      file: externalFile,
+      lineAnnotations: externalAnnotations,
+    } = this;
+    if (editSessionFile == null || externalFile == null) {
+      return;
+    }
+    if (this.editor != null) {
+      throw new Error(
+        'File.completeEditSession: detach the editor before completing the session'
+      );
+    }
+
+    const sessionAnnotationsCurrent = editSessionAnnotations?.current;
+    const contentsChanged = editSessionFile.contents !== externalFile.contents;
+    let acceptedFile: FileContents | undefined;
+    let failed = false;
+    let failure: unknown;
+    if (contentsChanged) {
+      const completedFile = { ...editSessionFile };
+      const event: FileEditCompleteEvent<LAnnotation> = {
+        file: completedFile,
+        originalFile: externalFile,
+        lineAnnotations: sessionAnnotationsCurrent,
+        originalLineAnnotations: externalAnnotations,
+      };
+      const { onEditComplete } = this.options;
+      // Frozen so a handler cannot swap the event's file/originalFile
+      // references; nested mutation (a fresh cacheKey on event.file) still
+      // works.
+      Object.freeze(event);
+      try {
+        const decision =
+          onEditComplete != null ? onEditComplete(event) : 'reject';
+        if (decision === 'accept') {
+          if (
+            completedFile.cacheKey != null &&
+            completedFile.cacheKey === externalFile.cacheKey
+          ) {
+            throw new Error(
+              'File.completeEditSession: an accepted file must not reuse the replaced file cacheKey'
+            );
+          }
+          acceptedFile = completedFile;
+        }
+      } catch (error) {
+        failed = true;
+        failure = error;
+      }
+    }
+
+    if (installResult && acceptedFile != null) {
+      this.file = acceptedFile;
+      if (sessionAnnotationsCurrent != null) {
+        this.lineAnnotations = sessionAnnotationsCurrent;
+      }
+    } else if (
+      installResult &&
+      !contentsChanged &&
+      sessionAnnotationsCurrent != null
+    ) {
+      this.lineAnnotations = sessionAnnotationsCurrent;
+    }
+    this.editSessionFile = undefined;
+    this.editSessionAnnotations = undefined;
+    this.pendingEditSessionReplacement = undefined;
+    this.pendingPersistedDocumentRestore = undefined;
+    // Ending the session with the settled file lets the renderer adopt it as
+    // the rendered identity when its cache already shows this content, so
+    // the next render treats it as current instead of a new file.
+    const { renderedFile, file: settledFile } = this;
+    this.fileRenderer.endEditSession(settledFile);
+    if (
+      renderedFile != null &&
+      settledFile != null &&
+      renderedFile !== settledFile &&
+      areFileTargetsEqual(renderedFile, settledFile)
+    ) {
+      this.renderedFile = settledFile;
+    }
+    if (installResult && this.fileContainer != null) {
+      this.rerender();
+    }
+    if (failed) {
+      throw failure;
+    }
+  }
+
   // normally triggered by the host when the document line count changes
   public applyDocumentChange(
     textDocument: DiffsTextDocument,
     newLineAnnotations?: LineAnnotation<LAnnotation>[]
   ): void {
-    const editSessionFile = this.editSessionFile;
+    const { editSessionFile } = this;
     if (editSessionFile == null) {
       throw new Error(
         'File.applyDocumentChange: requires an active edit session'
@@ -745,13 +1044,8 @@ export class File<
     }
     this.fileRenderer.beginEditSession(editSessionFile);
     this.fileRenderer.applyDocumentChange(textDocument);
-    if (
-      newLineAnnotations != null &&
-      newLineAnnotations !== this.lineAnnotations
-    ) {
-      this.setLineAnnotations(newLineAnnotations);
-      this.fileRenderer.setLineAnnotations(this.lineAnnotations);
-      this.renderAnnotations();
+    if (newLineAnnotations != null) {
+      this.syncEditSessionAnnotationsFromEditor(newLineAnnotations);
     }
   }
 
@@ -802,12 +1096,12 @@ export class File<
     const themeChanged = this.hasThemeChanged();
     const annotationsChanged =
       lineAnnotations != null &&
-      (lineAnnotations.length > 0 || this.lineAnnotations.length > 0)
-        ? lineAnnotations !== this.lineAnnotations
+      (lineAnnotations.length > 0 || this.getLatestAnnotations().length > 0)
+        ? this.isNewAnnotations(lineAnnotations)
         : false;
     const didFileChange = !areFileTargetsEqual(this.file, file);
     if (didFileChange) {
-      this.updateExternalFile(file);
+      this.updateExternalFile(file, lineAnnotations);
     }
     const latestFile = this.getLatestFile(file) ?? file;
     if (
@@ -830,7 +1124,7 @@ export class File<
     if (lineAnnotations != null) {
       this.setLineAnnotations(lineAnnotations);
     }
-    this.fileRenderer.setLineAnnotations(this.lineAnnotations);
+    this.fileRenderer.setLineAnnotations(this.getLatestAnnotations());
 
     const { disableErrorHandling = false, disableFileHeader = false } =
       this.options;
@@ -1127,9 +1421,11 @@ export class File<
     }
     const staleAnnotations = new Map(this.annotationCache);
     const { renderAnnotation } = this.options;
-    if (renderAnnotation != null && this.lineAnnotations.length > 0) {
-      for (const [index, annotation] of this.lineAnnotations.entries()) {
-        const id = `${index}-${getLineAnnotationName(annotation)}`;
+    const lineAnnotations = this.getLatestAnnotations();
+    if (renderAnnotation != null && lineAnnotations.length > 0) {
+      for (const [index, annotation] of lineAnnotations.entries()) {
+        const name = this.getAnnotationSlotName(annotation);
+        const id = `${index}-${name}`;
         let cache = this.annotationCache.get(id);
         if (
           cache == null ||
@@ -1143,9 +1439,7 @@ export class File<
             continue;
           }
           cache = {
-            element: createAnnotationWrapperNode(
-              getLineAnnotationName(annotation)
-            ),
+            element: createAnnotationWrapperNode(name),
             annotation,
           };
           cache.element.appendChild(content);

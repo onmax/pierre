@@ -10,6 +10,7 @@ import type {
   FileContents,
   HighlightedToken,
 } from '../src/types';
+import { getLineAnnotationName } from '../src/utils/getLineAnnotationName';
 import { installDom } from './domHarness';
 
 const MODEL_LINE_TOP = 20;
@@ -84,6 +85,12 @@ class VirtualizedEditableComponent implements DiffsEditableComponent<undefined> 
     this.#editor = undefined;
     this.fileContainer.remove();
   }
+
+  emitEditChange(): void {}
+
+  getAnnotationSlotName = getLineAnnotationName;
+
+  completeEditSession(): void {}
 
   attachEditor(editor: DiffsEditor<undefined>): () => void {
     this.#editor = editor;

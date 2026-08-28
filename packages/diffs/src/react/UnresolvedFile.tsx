@@ -50,7 +50,12 @@ export interface UnresolvedFileReactOptions<LAnnotation>
 
 export interface UnresolvedFileProps<LAnnotation> extends Omit<
   FileDiffProps<LAnnotation>,
-  'fileDiff' | 'options' | 'edit' | 'editorOptions'
+  | 'fileDiff'
+  | 'options'
+  | 'edit'
+  | 'editorOptions'
+  | 'onEditChange'
+  | 'onEditComplete'
 > {
   file: FileContents;
   options?: UnresolvedFileReactOptions<LAnnotation>;
