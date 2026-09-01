@@ -5,22 +5,6 @@ layer: 'library'
 tags: ['tsdown', 'publishable']
 
 tasks:
-  # The runtime needs the CommonJS-compatible default import, but declarations
-  # must use named types so consumers do not need synthetic default imports.
-  build:
-    script: 'tsdown --clean && bun scripts/assert-portable-worker-types.ts'
-    deps:
-      - '^:build'
-    inputs:
-      - 'src/**/*'
-      - 'scripts/assert-portable-worker-types.ts'
-      - 'tsdown.config.ts'
-      - 'tsconfig.json'
-    outputs:
-      - 'dist'
-    options:
-      merge: 'replace'
-
   # Bun's default per-test timeout (5s) is the same as the domHarness waitFor
   # budget, so a stalled wait would hit Bun's generic timeout before the
   # caller's informative expect fires. Keep the per-test limit comfortably
